@@ -244,6 +244,7 @@ h1,h2,h3,h4{font-weight:700;}
 }
 .task-btn:active{transform:scale(.92);}
 .task-btn-done{background:var(--light-blue);color:var(--blue);}
+.task-btn-edit{background:var(--light-yellow);color:#a88c00;}
 .task-btn-del{background:var(--light-red);color:var(--red);}
 .task-btn-end{background:var(--light-yellow);color:#a88c00;}
 
@@ -1641,6 +1642,7 @@ function taskItemHTML(key,m,t){
           ${subHtml}
           <div class="task-actions">
             <button class="task-btn task-btn-done" onclick="toggleTask('${key}','${t.id}',event)">${t.isDone?'↩️ 取消完成':'✅ 标记完成'}</button>
+            <button class="task-btn task-btn-edit" onclick="openEditTask('${key}','${t.id}')">✏️ 编辑</button>
             <button class="task-btn task-btn-done" onclick="addSubtaskUI('${key}','${t.id}')">➕ 子任务</button>
             ${t.repeat&&t.repeat!=='none'?`<button class="task-btn task-btn-end" onclick="endRepeat('${key}','${t.id}')">🛑 结束重复</button>`:''}
             <button class="task-btn task-btn-del" onclick="deleteTask('${key}','${t.id}')">🗑️ 删除</button>
@@ -1719,6 +1721,71 @@ function addTask(key){
   saveDB();
   closeBottomSheet();
   showToast('🎀 已添加~');
+  renderModulePage(key);
+}
+
+// ============================================================
+//  编辑任务
+// ============================================================
+function openEditTask(key,taskId){
+  const task=DB.tasks[key].find(t=>t.id===taskId);
+  if(!task){ showToast('任务不存在'); return; }
+  const m=MODULES.find(x=>x.key===key);
+  let html=`
+    <h3>✏️ 编辑任务</h3>
+    <div class="input-group">
+      <label>任务名称</label>
+      <input type="text" id="editTaskTitle" value="${task.title}" placeholder="${m.placeholder}">
+    </div>
+    <div class="input-group">
+      <label>目标时长（分钟）</label>
+      <input type="number" id="editTaskTarget" value="${task.targetMin||''}" placeholder="例如 45" min="0">
+    </div>
+    <div class="input-group">
+      <label>📚 任务总量（题 / 套）</label>
+      <input type="number" id="editTaskTotal" value="${task.taskTotal||''}" placeholder="例如 1000">
+    </div>
+    <div class="input-group">
+      <label>✅ 已完成量</label>
+      <input type="number" id="editTaskDone" value="${task.taskDone||0}" min="0" placeholder="0">
+    </div>
+    <div class="input-group">
+      <label>每日完成量（题 / 套）</label>
+      <input type="number" id="editTaskDaily" value="${task.dailyTarget||''}" placeholder="例如 10">
+    </div>
+    <div class="input-group">
+      <label>重复</label>
+      <select id="editTaskRepeat">
+        <option value="none" ${task.repeat==='none'?'selected':''}>不重复</option>
+        <option value="daily" ${task.repeat==='daily'?'selected':''}>每天</option>
+        <option value="weekday" ${task.repeat==='weekday'?'selected':''}>每个工作日</option>
+        <option value="weekly" ${task.repeat==='weekly'?'selected':''}>每周</option>
+        <option value="monthly" ${task.repeat==='monthly'?'selected':''}>每月</option>
+      </select>
+    </div>
+    <button class="save-btn" onclick="saveEditTask('${key}','${taskId}')">💾 保存修改</button>
+    <div class="bs-close" onclick="closeBottomSheet()">取消</div>
+  `;
+  openBottomSheet(html);
+}
+
+function saveEditTask(key,taskId){
+  const task=DB.tasks[key].find(t=>t.id===taskId);
+  if(!task){ showToast('任务不存在'); return; }
+  const title=document.getElementById('editTaskTitle').value.trim();
+  if(!title){ showToast('请输入任务名称'); return; }
+
+  task.title = title;
+  task.targetMin = parseInt(document.getElementById('editTaskTarget').value)||0;
+  task.taskTotal = parseInt(document.getElementById('editTaskTotal').value)||0;
+  task.taskDone  = parseInt(document.getElementById('editTaskDone').value)||0;
+  if(task.taskTotal && task.taskDone > task.taskTotal) task.taskDone = task.taskTotal;
+  task.dailyTarget = parseInt(document.getElementById('editTaskDaily').value)||0;
+  task.repeat = document.getElementById('editTaskRepeat').value;
+
+  saveDB();
+  closeBottomSheet();
+  showToast('✏️ 已更新~');
   renderModulePage(key);
 }
 
