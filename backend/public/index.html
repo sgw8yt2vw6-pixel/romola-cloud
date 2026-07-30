@@ -191,8 +191,10 @@ h1,h2,h3,h4{font-weight:700;}
   box-shadow:0 8px 32px rgba(0,0,0,.18);animation:fadeIn .2s;
 }
 .today-overview h4{color:var(--red);margin-bottom:10px;font-size:14px;}
-.today-overview-item{display:flex;justify-content:space-between;font-size:13px;padding:4px 0;}
-.today-overview-item span:last-child{color:var(--blue);font-weight:700;}
+.today-overview-item{display:flex;justify-content:space-between;align-items:center;font-size:13px;padding:4px 0;}
+.today-overview-item span:last-child{color:var(--blue);font-weight:700;display:flex;align-items:center;gap:4px;}
+.del-dur-btn{cursor:pointer;font-size:13px;opacity:.5;transition:opacity .1s;}
+.del-dur-btn:active{opacity:1;}
 
 /* 模块头 */
 .module-header{
@@ -1356,11 +1358,12 @@ function toggleTodayOverview(){
   const mask=document.getElementById('ovMask');
   const content=document.getElementById('ovContent');
   const today=todayStr();
-  let html='<h4>🎀 今日概览</h4>';
+  let html='<h4>🎀 今日时长概览 <span style="font-size:11px;color:var(--text-sec);font-weight:400;">（点击 🗑️ 删除）</span></h4>';
   MODULES.forEach(m=>{
     const dur=getDayModuleDuration(today,m.key);
     if(dur>0){
-      html+=`<div class="today-overview-item"><span>${m.icon} ${m.name}</span><span>${fmtTime(dur)}</span></div>`;
+      const hasManual = DB.manualDuration[today] && DB.manualDuration[today][m.key];
+      html+=`<div class="today-overview-item"><span>${m.icon} ${m.name}</span><span>${fmtTime(dur)}${hasManual?` <span class="del-dur-btn" onclick="deleteManualDuration('${m.key}',event)">🗑️</span>`:''}</span></div>`;
     }
   });
   const total=getDayTotalDuration(today);
@@ -1370,6 +1373,21 @@ function toggleTodayOverview(){
   content.innerHTML=html;
   mask.classList.add('show');
   mask.onclick=function(e){ if(e.target===mask) mask.classList.remove('show'); };
+}
+
+function deleteManualDuration(moduleKey,e){
+  e.stopPropagation();
+  if(!confirm(`删除 "${MODULES.find(m=>m.key===moduleKey).name}" 今日的手动输入时长？`)) return;
+  const today=todayStr();
+  if(DB.manualDuration[today]){
+    delete DB.manualDuration[today][moduleKey];
+    saveDB();
+    showToast('🗑️ 已删除');
+    toggleTodayOverview(); // 刷新浮层
+    // 刷新当前页面
+    const activePage=document.querySelector('.nav-item.active');
+    if(activePage) renderPage(activePage.dataset.page);
+  }
 }
 
 function openAddDurationPicker(){
@@ -1549,7 +1567,10 @@ function editTodayDuration(key){
       <input type="number" id="editDurInput" value="${cur}" min="0">
       <div style="font-size:11px;color:var(--text-sec);margin-top:4px;">任务自动累加的时长不在此修改</div>
     </div>
-    <button class="save-btn" onclick="saveEditDuration('${key}')">🎀 保存</button>
+    <div style="display:flex;gap:8px;">
+      <button class="save-btn" style="flex:1;" onclick="saveEditDuration('${key}')">🎀 保存</button>
+      ${cur>0?`<button class="save-btn ghost" style="flex:1;" onclick="deleteEditDuration('${key}')">🗑️ 删除</button>`:''}
+    </div>
     <div class="bs-close" onclick="closeBottomSheet()">取消</div>
   `;
   openBottomSheet(html);
@@ -1562,6 +1583,17 @@ function saveEditDuration(key){
   saveDB();
   closeBottomSheet();
   showToast('🎀 已保存~');
+  renderModulePage(key);
+}
+function deleteEditDuration(key){
+  const today=todayStr();
+  if(!confirm(`确定删除 ${MODULES.find(m=>m.key===key).name} 今日的手动时长吗？`)) return;
+  if(DB.manualDuration[today]){
+    delete DB.manualDuration[today][key];
+    saveDB();
+  }
+  closeBottomSheet();
+  showToast('🗑️ 已删除');
   renderModulePage(key);
 }
 
