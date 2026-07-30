@@ -418,6 +418,47 @@ h1,h2,h3,h4{font-weight:700;}
 .star-grid-item{flex:1;text-align:center;font-size:18px;opacity:.3;}
 .star-grid-item.lit{opacity:1;}
 
+/* ============ 方块进度（参考图片风格） ============ */
+.prog-block-row{display:flex;align-items:center;gap:4px;margin:6px 0;flex-wrap:nowrap;}
+.prog-block-label{font-size:11px;color:var(--text-sec);font-weight:600;flex-shrink:0;margin-right:2px;}
+.prog-block{
+  flex:1;height:18px;background:#e8e8ec;border-radius:2px;overflow:hidden;
+  position:relative;min-width:14px;border:1px solid #d4d4da;
+  box-shadow:inset 0 1px 2px rgba(0,0,0,.06);
+}
+.prog-block-fill{
+  height:100%;background:linear-gradient(135deg,#5cb85c,#4cae4c);
+  border-radius:1px;transition:width .5s;
+  box-shadow:inset 0 -1px 0 rgba(0,0,0,.1);
+}
+.prog-block.full{border-color:#3d8b3d;}
+.prog-block.partial{border-color:#88c08e;}
+.prog-block-unit{font-size:11px;color:var(--text-sec);font-weight:600;flex-shrink:0;margin-left:2px;}
+
+/* 总任务进程图表（汇总所有模块） */
+.grand-progress-card{
+  background:linear-gradient(135deg,#fff 0%,var(--light-yellow) 100%);
+  border-radius:var(--radius-card);padding:14px;margin-bottom:14px;
+  box-shadow:var(--shadow);
+}
+.grand-progress-card .gpc-title{
+  font-size:13px;font-weight:700;color:var(--red);margin-bottom:8px;
+  display:flex;justify-content:space-between;align-items:center;
+}
+.grand-progress-card .gpc-title .gpc-val{color:var(--blue);font-size:12px;font-weight:700;}
+.grand-progress-card .gpc-summary{
+  font-size:11px;color:var(--text-sec);margin-bottom:8px;
+}
+.grand-progress-card .gpc-module{
+  margin-bottom:10px;padding:8px;background:#fff;border-radius:10px;
+}
+.grand-progress-card .gpc-module:last-child{margin-bottom:0;}
+.grand-progress-card .gpc-mod-name{
+  display:flex;justify-content:space-between;font-size:12px;margin-bottom:6px;
+}
+.grand-progress-card .gpc-mod-name .gpc-mod-label{font-weight:700;color:var(--text);}
+.grand-progress-card .gpc-mod-name .gpc-mod-val{color:var(--blue);font-weight:700;}
+
 /* 标签 */
 .tabs{display:flex;gap:0;margin-bottom:14px;background:#fff;border-radius:14px;padding:5px;box-shadow:var(--shadow);overflow-x:auto;}
 .tab-item{
@@ -959,6 +1000,143 @@ function getGrandTaskTotals(){
 }
 
 // ============================================================
+//  方块进度（参考图片：12 个小方块可视化）
+// ============================================================
+/**
+ * 渲染 12 格方块进度
+ * @param {number} done 已完成数量
+ * @param {number} total 总量
+ * @param {string} unit 单位（如 "题"、"套"），可选
+ * @param {number} blockCount 方块数（默认 12）
+ */
+function renderBlockProgress(done, total, unit='', blockCount=12){
+  if(!total || total<=0) return '';
+  done = Math.min(done||0, total);
+  const perBlock = total / blockCount;
+  let html = '<div class="prog-block-row">';
+  html += '<span class="prog-block-label">进度：</span>';
+  for(let i=1; i<=blockCount; i++){
+    const blockStart = (i-1) * perBlock;
+    const blockEnd = i * perBlock;
+    let pct = 0;
+    let cls = 'empty';
+    if(done >= blockEnd){
+      pct = 100;
+      cls = 'full';
+    } else if(done > blockStart){
+      pct = ((done - blockStart) / perBlock) * 100;
+      cls = 'partial';
+    }
+    html += `<div class="prog-block ${cls}"><div class="prog-block-fill" style="width:${pct.toFixed(1)}%"></div></div>`;
+  }
+  if(unit) html += `<span class="prog-block-unit">${unit}</span>`;
+  html += '</div>';
+  return html;
+}
+
+// 单模块任务总量进程可视化（方块进度 + 总数）
+function renderModuleBlockChartHTML(moduleKey, m){
+  const tasks = DB.tasks[moduleKey]||[];
+  let total = 0, done = 0, hasSub = false;
+  const subtaskItems = [];
+  tasks.forEach(t=>{
+    if(t.taskTotal){
+      total += parseInt(t.taskTotal)||0;
+      done  += parseInt(t.taskDone)||0;
+      hasSub = true;
+      // 收集子任务进度
+      if(t.subtasks && t.subtasks.length>0){
+        const subDone = t.subtasks.filter(s=>s.done).length;
+        subtaskItems.push({
+          title: t.title,
+          total: t.taskTotal,
+          done: t.taskDone||0,
+          subtasks: t.subtasks,
+          subtaskDone: subDone,
+          subtaskTotal: t.subtasks.length
+        });
+      }
+    }
+  });
+  if(total === 0) return '';
+  const pct = Math.round(done/total*100);
+  let html = `
+    <div class="grand-progress-card">
+      <div class="gpc-title">
+        <span>🎯 ${m.icon} ${m.name} - 任务总量进程</span>
+        <span class="gpc-val">${done} / ${total}（${pct}%）</span>
+      </div>
+      <div class="gpc-summary">每块 ≈ ${Math.ceil(total/12)} ${t.unit||'题'}，绿色为已完成</div>
+      ${renderBlockProgress(done, total, t.unit||'题')}
+  `;
+  // 子任务展开
+  if(subtaskItems.length > 0){
+    html += '<div style="margin-top:10px;border-top:1px dashed #eee;padding-top:8px;">';
+    subtaskItems.forEach(item=>{
+      html += `
+        <div style="font-size:12px;margin-bottom:6px;color:var(--text-sec);">
+          <div style="display:flex;justify-content:space-between;margin-bottom:4px;">
+            <span>📌 ${item.title}</span>
+            <span style="color:var(--blue);font-weight:700;">子任务 ${item.subtaskDone}/${item.subtaskTotal}</span>
+          </div>
+          ${renderBlockProgress(item.done, item.total, '', 10)}
+        </div>`;
+    });
+    html += '</div>';
+  }
+  html += '</div>';
+  return html;
+}
+
+// 总任务进程可视化（首页 + 统计页用）
+function renderGrandTaskChartHTML(){
+  const grand = getGrandTaskTotals();
+  if(grand.total === 0){
+    return `
+      <div class="grand-progress-card">
+        <div class="gpc-title">
+          <span>🎯 总任务进程</span>
+          <span class="gpc-val">尚未设置</span>
+        </div>
+        <div style="font-size:12px;color:var(--text-sec);padding:8px 0;">
+          在每个模块的"添加任务"中设置「任务总量」+「每日完成量」即可看到方块进度
+        </div>
+      </div>
+    `;
+  }
+  const pct = Math.round(grand.done/grand.total*100);
+  const modulesWithTasks = [];
+  MODULES.forEach(m=>{
+    const r = getModuleTotals(m.key);
+    if(r.total > 0){
+      modulesWithTasks.push({...m, ...r});
+    }
+  });
+
+  let html = `
+    <div class="grand-progress-card">
+      <div class="gpc-title">
+        <span>🎯 总任务进程（所有模块）</span>
+        <span class="gpc-val">${grand.done} / ${grand.total}（${pct}%）</span>
+      </div>
+      ${renderBlockProgress(grand.done, grand.total, '')}
+  `;
+  modulesWithTasks.forEach(m=>{
+    const mPct = Math.round(m.done/m.total*100);
+    html += `
+      <div class="gpc-module">
+        <div class="gpc-mod-name">
+          <span class="gpc-mod-label">${m.icon} ${m.name}</span>
+          <span class="gpc-mod-val">${m.done}/${m.total}（${mPct}%）</span>
+        </div>
+        ${renderBlockProgress(m.done, m.total, '', 12)}
+      </div>`;
+  });
+  html += '</div>';
+  return html;
+}
+
+// ============================================================
 //  首页
 // ============================================================
 function renderHome(){
@@ -1041,12 +1219,12 @@ function renderHome(){
   const grandTotals = getGrandTaskTotals();
   const grandPct = grandTotals.total>0 ? Math.round(grandTotals.done/grandTotals.total*100) : 0;
   const grandBar = `
-    <div class="big-progress-card">
-      <div class="bpc-head">
-        <div class="bpc-title">🎯 任务总进度</div>
-        <div class="bpc-val">${grandTotals.done} / ${grandTotals.total} 题（${grandPct}%）</div>
+    <div class="grand-progress-card">
+      <div class="gpc-title">
+        <span>🎯 总任务进程</span>
+        <span class="gpc-val">${grandTotals.done} / ${grandTotals.total} 题（${grandPct}%）</span>
       </div>
-      <div class="bpc-bar"><div class="bpc-fill" style="width:${grandPct}%;"></div></div>
+      ${grandTotals.total>0 ? renderBlockProgress(grandTotals.done, grandTotals.total, '') : '<div style="font-size:12px;color:var(--text-sec);text-align:center;padding:8px;">在每个模块设置「任务总量」+「每日完成量」即可看到方块进度</div>'}
       ${renderGrandProgressList()}
     </div>
   `;
@@ -1344,14 +1522,15 @@ function bigTaskProgressHTML(key){
   const t = getModuleTotals(key);
   if(t.total===0) return '';
   const pct = Math.round(t.done/t.total*100);
+  const m = MODULES.find(x=>x.key===key);
   return `
-    <div class="big-progress-card">
-      <div class="bpc-head">
-        <div class="bpc-title">🎯 任务总量进度</div>
-        <div class="bpc-val">${t.done} / ${t.total}（${pct}%）</div>
+    <div class="grand-progress-card">
+      <div class="gpc-title">
+        <span>🎯 ${m.icon} ${m.name} - 任务总量进程</span>
+        <span class="gpc-val">${t.done} / ${t.total}（${pct}%）</span>
       </div>
-      <div class="bpc-bar"><div class="bpc-fill" style="width:${pct}%;"></div></div>
-      <div style="font-size:12px;color:var(--text-sec);margin-top:6px;text-align:center;">每日完成量在「添加任务」中可自由设置</div>
+      ${renderBlockProgress(t.done, t.total, '题')}
+      <div style="font-size:11px;color:var(--text-sec);margin-top:6px;text-align:center;">每格 ≈ ${Math.ceil(t.total/12)} 题 · 在「添加任务」中可自由设置总量与每日量</div>
     </div>
   `;
 }
@@ -1424,19 +1603,20 @@ function taskItemHTML(key,m,t){
     });
     subHtml += '</div>';
   }
-  // 总量进度
+  // 总量进度（方块风格，参考图片）
   let totalProg='';
   if(t.taskTotal){
-    const pct=Math.round((parseInt(t.taskDone)||0)/t.taskTotal*100);
+    const done = parseInt(t.taskDone)||0;
+    const total = parseInt(t.taskTotal)||0;
+    const pct = Math.round(done/total*100);
     totalProg = `
-      <div style="margin-top:8px;">
-        <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px;">
-          <span style="color:var(--text-sec);">总进度</span>
-          <span style="color:var(--blue);font-weight:700;">${t.taskDone||0}/${t.taskTotal}（${pct}%）</span>
+      <div style="margin-top:8px;padding:8px;background:var(--bg-deep);border-radius:10px;">
+        <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:6px;">
+          <span style="color:var(--text-sec);font-weight:600;">📊 总进度</span>
+          <span style="color:var(--blue);font-weight:800;">${done}/${total}（${pct}%）</span>
         </div>
-        <div style="height:8px;background:var(--light-yellow);border-radius:4px;overflow:hidden;">
-          <div style="height:100%;background:var(--red);width:${pct}%;"></div>
-        </div>
+        ${renderBlockProgress(done, total, '题')}
+        ${t.dailyTarget?`<div style="font-size:11px;color:var(--text-sec);margin-top:4px;">每日完成 ${t.dailyTarget} 题</div>`:''}
       </div>`;
   }
   return `
@@ -1881,34 +2061,39 @@ function chartSectionHTML(key){
   return html;
 }
 
-// 总任务进程可视化（每个模块任务总量进度）
+// 总任务进程可视化（每个模块任务总量进度 - 方块风格）
 function renderTaskTotalsChartHTML(){
   const rows=[];
   MODULES.forEach(m=>{
     const t=getModuleTotals(m.key);
     if(t.total>0){
       rows.push({name:m.name, icon:m.icon, done:t.done, total:t.total,
-        pct: Math.round(t.done/t.total*100)});
+        pct: Math.round(t.done/t.total*100), key:m.key});
     }
   });
   if(rows.length===0) return '';
   rows.sort((a,b)=>b.pct-a.pct);
+  const grand = getGrandTaskTotals();
   let html = `
     <div class="chart-container">
-      <div style="font-size:13px;color:var(--red);font-weight:700;">🎯 各模块任务总量进度</div>`;
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+        <div style="font-size:13px;color:var(--red);font-weight:800;">🎯 总任务进程（所有模块）</div>
+        <div style="font-size:12px;color:var(--blue);font-weight:700;">${grand.done}/${grand.total}（${Math.round(grand.done/grand.total*100)}%）</div>
+      </div>
+      ${renderBlockProgress(grand.done, grand.total, '')}
+      <div style="border-top:1px dashed #eee;margin-top:12px;padding-top:10px;">
+        <div style="font-size:12px;color:var(--text-sec);font-weight:600;margin-bottom:6px;">各模块：</div>`;
   rows.forEach(r=>{
     html+=`
-      <div style="margin-top:10px;">
-        <div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px;">
-          <span style="font-weight:700;">${r.icon} ${r.name}</span>
+      <div style="margin-top:8px;">
+        <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px;">
+          <span style="font-weight:700;color:var(--text);">${r.icon} ${r.name}</span>
           <span style="color:var(--blue);font-weight:700;">${r.done}/${r.total} · ${r.pct}%</span>
         </div>
-        <div style="height:12px;background:var(--light-yellow);border-radius:6px;overflow:hidden;">
-          <div style="height:100%;background:linear-gradient(90deg,var(--yellow),var(--red));width:${r.pct}%;transition:width .5s;"></div>
-        </div>
+        ${renderBlockProgress(r.done, r.total, '', 10)}
       </div>`;
   });
-  html += '</div>';
+  html += '</div></div>';
   return html;
 }
 
@@ -2955,17 +3140,17 @@ function renderStatsContent(){
   html+=`<div class="stat-data-card"><div class="sdc-val">${streak}</div><div class="sdc-label">连续记录天数</div></div>`;
   html+='</div>';
 
-  // 总体任务进度可视化（与首页一致）
+  // 总体任务进度可视化（与首页一致，使用方块风格）
   const grand = getGrandTaskTotals();
   if(grand.total>0){
     const pct = Math.round(grand.done/grand.total*100);
     html+=`
-      <div class="big-progress-card">
-        <div class="bpc-head">
-          <div class="bpc-title">🎯 总任务进程</div>
-          <div class="bpc-val">${grand.done}/${grand.total}（${pct}%）</div>
+      <div class="grand-progress-card">
+        <div class="gpc-title">
+          <span>🎯 总任务进程</span>
+          <span class="gpc-val">${grand.done}/${grand.total}（${pct}%）</span>
         </div>
-        <div class="bpc-bar"><div class="bpc-fill" style="width:${pct}%;"></div></div>
+        ${renderBlockProgress(grand.done, grand.total, '')}
         ${renderGrandProgressList()}
       </div>`;
   }
