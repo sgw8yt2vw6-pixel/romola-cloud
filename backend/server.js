@@ -1,10 +1,20 @@
-require('dotenv').config();
+// 容错加载 .env（Railway 上 .env 不存在也不会崩）
+try { require('dotenv').config(); } catch(_) {}
+
 const express = require('express');
 const cors = require('cors');
 const supabase = require('./supabase');
 
 const app = express();
 const PORT = process.env.PORT || 8080;
+const HOST = '0.0.0.0';
+
+// 立即打印启动日志（避免 Railway healthcheck 等待）
+console.log('🎀 Romola Cloud Server 启动中...');
+console.log('   PORT:', PORT);
+console.log('   HOST:', HOST);
+console.log('   SUPABASE_URL:', process.env.SUPABASE_URL ? '已设置' : '⚠️ 未设置');
+console.log('   SUPABASE_KEY:', (process.env.SUPABASE_PUBLISHABLE_KEY || process.env.SUPABASE_ANON_KEY) ? '已设置' : '⚠️ 未设置');
 
 // ============================================================
 //  中间件
@@ -163,9 +173,15 @@ app.get('*', (req, res) => {
 // ============================================================
 //  启动
 // ============================================================
-app.listen(PORT, '0.0.0.0', () => {
+const server = app.listen(PORT, HOST, () => {
   console.log(`🎀 Romola Cloud Server running on port ${PORT}`);
-  console.log(`   Health: http://0.0.0.0:${PORT}/api/health`);
+  console.log(`   Health: http://${HOST}:${PORT}/api/health`);
   console.log(`   Push:   POST /api/sync/push`);
   console.log(`   Pull:   GET  /api/sync/pull?deviceId=xxx`);
+});
+
+// 优雅关闭
+process.on('SIGTERM', () => {
+  console.log('SIGTERM received, shutting down...');
+  server.close(() => process.exit(0));
 });
