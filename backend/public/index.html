@@ -3556,6 +3556,7 @@ function renderSettingsPage(){
       <button class="data-action-btn" style="background:var(--light-blue);color:var(--blue);" onclick="document.getElementById('import-file').click()">📤 导入数据 (JSON)</button>
       <input type="file" id="import-file" accept=".json" style="display:none;" onchange="importData(this)">
       <button class="data-action-btn" style="background:var(--light-red);color:var(--red);" onclick="clearAllData()">🗑️ 清空所有数据</button>
+      <button class="data-action-btn" style="background:var(--light-yellow);color:var(--dark);" onclick="dedupAllData()">🔍 一键去重（清理重复记录）</button>
     </div>
 
     <div class="card">
@@ -3748,14 +3749,19 @@ function mergeDB(local, remote){
   if(!remote) return local;
   const merged = JSON.parse(JSON.stringify(remote));
 
-  // 基础数组字段合并
+  // 基础数组字段合并（使用更精确的 key）
   const arrays = ['moods','reviews','diet','mokao','weight','materials'];
   arrays.forEach(k=>{
     if(!merged[k]) merged[k]=[];
     const map = new Map();
-    merged[k].forEach(x => map.set(x.id||x.date, true));
+    // 用 id 或 "date|timestamp" 作为 key，避免同天不同记录被误判为重复
+    merged[k].forEach(x => {
+      const key = x.id || `${x.date}|${x.timestamp||(x.id?x.id:'')}`;
+      map.set(key, true);
+    });
     (local[k]||[]).forEach(x => {
-      if(!map.has(x.id||x.date)) merged[k].push(x);
+      const key = x.id || `${x.date}|${x.timestamp||(x.id?x.id:'')}`;
+      if(!map.has(key)) merged[k].push(x);
     });
   });
 
@@ -3765,9 +3771,13 @@ function mergeDB(local, remote){
     Object.keys(local[group]||{}).forEach(modKey=>{
       if(!merged[group][modKey]) merged[group][modKey]=[];
       const map = new Map();
-      merged[group][modKey].forEach(x => map.set(x.id||x.date+'|'+x.subType, true));
+      merged[group][modKey].forEach(x => {
+        const key = x.id || `${x.date}|${x.timestamp||(x.subType||'')}`;
+        map.set(key, true);
+      });
       (local[group][modKey]||[]).forEach(x => {
-        if(!map.has(x.id||x.date+'|'+x.subType)) merged[group][modKey].push(x);
+        const key = x.id || `${x.date}|${x.timestamp||(x.subType||'')}`;
+        if(!map.has(key)) merged[group][modKey].push(x);
       });
     });
   });
@@ -3778,6 +3788,27 @@ function mergeDB(local, remote){
       if(!merged.mokaoSubs[date]) merged.mokaoSubs[date] = local.mokaoSubs[date];
     });
   }
+
+  // 去重：合并后清理完全相同的记录（同日期+同数值）
+  // 只清理基础数组
+  arrays.forEach(k=>{
+    if(!merged[k] || merged[k].length < 2) return;
+    const seen = new Map();
+    merged[k] = merged[k].filter(x => {
+      // 对没有 id 的记录做模糊去重
+      if(x.id) return true; // 有 id 的一律保留
+      const sig = x.date;
+      if(!sig) return true;
+      if(seen.has(sig)){
+        // 同日期、同数值的视为重复，只保留一个
+        const prev = seen.get(sig);
+        if(JSON.stringify(x) === JSON.stringify(prev)) return false;
+        return true;
+      }
+      seen.set(sig, x);
+      return true;
+    });
+  });
 
   // services 配置等
   ['examDate','settings','quotes'].forEach(k=>{
@@ -3847,6 +3878,45 @@ function clearAllData(){
     showToast('已清空');
     goPage('home');
   }
+}
+
+// ============================================================
+//  一键去重
+// ============================================================
+function dedupAllData(){
+  let removed = 0;
+  const dedupArray = (arr) => {
+    if(!arr || arr.length < 2) return arr;
+    const seen = new Map();
+    return arr.filter(x => {
+      const key = x.id || `${x.date}|${x.timestamp||JSON.stringify(x)}`;
+      if(seen.has(key)){ removed++; return false; }
+      seen.set(key, true);
+      return true;
+    });
+  };
+
+  // moods / reviews / diet / mokao / weight / materials
+  ['moods','reviews','diet','mokao','weight','materials'].forEach(k=>{
+    const before = (DB[k]||[]).length;
+    DB[k] = dedupArray(DB[k]||[]);
+  });
+
+  // tasks / records 逐模块去重
+  ['tasks','records'].forEach(group=>{
+    Object.keys(DB[group]||{}).forEach(modKey=>{
+      DB[group][modKey] = dedupArray(DB[group][modKey]||[]);
+    });
+  });
+
+  saveDB();
+  if(removed > 0){
+    showToast(`🔍 已清理 ${removed} 条重复记录`);
+  } else {
+    showToast('✅ 没有发现重复数据');
+  }
+  const active=document.querySelector('.nav-item.active');
+  if(active) renderPage(active.dataset.page);
 }
 
 // ============================================================
