@@ -768,7 +768,10 @@ function saveDB(){
 
 // 异步云端推送（不阻塞 UI）
 let _lastPushTime = 0;
+let _isPulling = false; // 正在从云端拉取时为 true，防止 pull→save→push 循环
 async function cloudPushAsync(deviceId, data){
+  // 拉取过程中不回推，避免循环
+  if(_isPulling) return;
   // 节流：5 秒内不重复推送
   const now = Date.now();
   if(now - _lastPushTime < 5000) return;
@@ -784,6 +787,7 @@ async function cloudPushAsync(deviceId, data){
     if(result.success){
       // 静默成功，不打扰用户
       _updateSyncIndicator(true, result.updatedAt);
+      localStorage.setItem(STORAGE_KEY + '_lastPush', Date.now());
     } else {
       console.warn('☁️ 推送失败:', result.error);
     }
@@ -3684,6 +3688,7 @@ async function pushCloud(){
     const result = await resp.json();
     if(result.success){
       const time = new Date(result.updatedAt).toLocaleString('zh-CN');
+      localStorage.setItem(STORAGE_KEY + '_lastPush', new Date(result.updatedAt).getTime());
       statusEl.innerHTML = `✅ 已推送到云端（${time}，${result.sizeKB}KB）`;
       showToast('☁️ 推送成功~');
     } else {
@@ -3720,8 +3725,11 @@ async function pullCloud(){
     const result = await resp.json();
     if(result.success){
       const updated = new Date(result.updatedAt).toLocaleString('zh-CN');
+      const cloudTime = new Date(result.updatedAt).getTime();
       DB = mergeDB(DB, result.data);
       localStorage.setItem(SYNC_KEY, id);
+      // 标记本地已同步到云端时间，避免 autoPull 反复合并
+      localStorage.setItem(STORAGE_KEY + '_lastPush', cloudTime);
       saveDB();
       statusEl.innerHTML = `✅ 已拉取（${updated}，${result.sizeKB}KB）`;
       showToast('☁️ 已拉取~');
@@ -3771,13 +3779,24 @@ function mergeDB(local, remote){
     Object.keys(local[group]||{}).forEach(modKey=>{
       if(!merged[group][modKey]) merged[group][modKey]=[];
       const map = new Map();
+      // 精确 key：优先用 id
       merged[group][modKey].forEach(x => {
-        const key = x.id || `${x.date}|${x.timestamp||(x.subType||'')}`;
-        map.set(key, true);
+        const key = x.id;
+        if(key) map.set(key, true);
       });
       (local[group][modKey]||[]).forEach(x => {
-        const key = x.id || `${x.date}|${x.timestamp||(x.subType||'')}`;
-        if(!map.has(key)) merged[group][modKey].push(x);
+        const key = x.id;
+        if(key && !map.has(key)){
+          merged[group][modKey].push(x);
+          map.set(key, true);
+        } else if(!key){
+          // 无 id 的旧数据用 date+timestamp+subType 兜底
+          const fkey = `${x.date}|${x.timestamp||''}|${x.subType||''}`;
+          if(!map.has(fkey)){
+            merged[group][modKey].push(x);
+            map.set(fkey, true);
+          }
+        }
       });
     });
   });
@@ -3789,18 +3808,36 @@ function mergeDB(local, remote){
     });
   }
 
-  // 去重：合并后清理完全相同的记录（同日期+同数值）
-  // 只清理基础数组
+  // ===== 任务模糊去重（关键）=====
+  // 同一模块下：同 title + 同 date + 同 originalId 视为重复，只保留最新一条
+  if(merged.tasks){
+    Object.keys(merged.tasks).forEach(modKey=>{
+      const arr = merged.tasks[modKey];
+      if(!arr || arr.length<2) return;
+      const seen = new Map();
+      const kept = [];
+      // 按 createdAt 降序，保留最新的
+      const sorted = arr.slice().sort((a,b)=>(b.createdAt||0)-(a.createdAt||0));
+      sorted.forEach(t=>{
+        const sig = `${t.title||''}|${t.date||''}|${t.originalId||(t.id||'')}`;
+        if(!seen.has(sig)){
+          seen.set(sig, true);
+          kept.push(t);
+        }
+      });
+      merged.tasks[modKey] = kept;
+    });
+  }
+
+  // 基础数组模糊去重（同 date + 同核心数值视为重复）
   arrays.forEach(k=>{
     if(!merged[k] || merged[k].length < 2) return;
     const seen = new Map();
     merged[k] = merged[k].filter(x => {
-      // 对没有 id 的记录做模糊去重
       if(x.id) return true; // 有 id 的一律保留
       const sig = x.date;
       if(!sig) return true;
       if(seen.has(sig)){
-        // 同日期、同数值的视为重复，只保留一个
         const prev = seen.get(sig);
         if(JSON.stringify(x) === JSON.stringify(prev)) return false;
         return true;
@@ -3885,6 +3922,7 @@ function clearAllData(){
 // ============================================================
 function dedupAllData(){
   let removed = 0;
+  // 基础数组：用 id 或 date|timestamp 去重
   const dedupArray = (arr) => {
     if(!arr || arr.length < 2) return arr;
     const seen = new Map();
@@ -3898,15 +3936,27 @@ function dedupAllData(){
 
   // moods / reviews / diet / mokao / weight / materials
   ['moods','reviews','diet','mokao','weight','materials'].forEach(k=>{
-    const before = (DB[k]||[]).length;
     DB[k] = dedupArray(DB[k]||[]);
   });
 
-  // tasks / records 逐模块去重
-  ['tasks','records'].forEach(group=>{
-    Object.keys(DB[group]||{}).forEach(modKey=>{
-      DB[group][modKey] = dedupArray(DB[group][modKey]||[]);
+  // records 逐模块去重（用 id）
+  Object.keys(DB.records||{}).forEach(modKey=>{
+    DB.records[modKey] = dedupArray(DB.records[modKey]||[]);
+  });
+
+  // tasks 逐模块去重：同 title + 同 date + 同 originalId 视为重复，保留最新
+  Object.keys(DB.tasks||{}).forEach(modKey=>{
+    const arr = DB.tasks[modKey]||[];
+    if(arr.length < 2) return;
+    const seen = new Map();
+    const kept = [];
+    const sorted = arr.slice().sort((a,b)=>(b.createdAt||0)-(a.createdAt||0));
+    sorted.forEach(t=>{
+      const sig = `${t.title||''}|${t.date||''}|${t.originalId||(t.id||'')}`;
+      if(!seen.has(sig)){ seen.set(sig, true); kept.push(t); }
+      else removed++;
     });
+    DB.tasks[modKey] = kept;
   });
 
   saveDB();
@@ -3925,28 +3975,44 @@ function dedupAllData(){
 function generateRecurringTasks(){
   const today=todayStr();
   const dayOfWeek=new Date().getDay(); // 0=Sun...
+  let created=false;
   MODULES.forEach(m=>{
-    (DB.tasks[m.key]||[]).forEach(t=>{
+    const list = DB.tasks[m.key]||[];
+    // 收集今天已生成任务的签名集合（originalId 或 title+date），确保幂等
+    const todaySigs = new Set();
+    list.forEach(x=>{
+      if(x.date===today){
+        // 用 originalId 作为重复来源标识；没有 originalId 的用 title 兜底
+        todaySigs.add(x.originalId || ('__self__'+x.title));
+      }
+    });
+    // 仅对「模板」生成：originalId 为空（即原始任务）且有 repeat
+    list.forEach(t=>{
       if(!t.repeat||t.repeat==='none') return;
-      // 如果已结束重复（用户主动 endRepeat）→ t.repeat='none'
-      const hasToday=DB.tasks[m.key].some(x=>x.originalId===t.id&&x.date===today);
-      if(hasToday) return;
+      // 已生成的实例（有 originalId 且 originalId 不等于自身 id）跳过，避免实例再生成实例
+      if(t.originalId && t.originalId!==t.id) return;
+      // 今天是否已存在该模板的实例
+      const sig = t.id;
+      if(todaySigs.has(sig)) return;
       let shouldCreate=false;
       if(t.repeat==='daily') shouldCreate=true;
       else if(t.repeat==='weekday') shouldCreate=(dayOfWeek>=1&&dayOfWeek<=5);
       else if(t.repeat==='weekly') shouldCreate=(dayOfWeek===1);
       else if(t.repeat==='monthly') shouldCreate=(new Date().getDate()===1);
       if(shouldCreate){
-        DB.tasks[m.key].push({
+        list.push({
           id:uid(),title:t.title,targetMin:t.targetMin,actualMin:0,isDone:false,
           date:today,createdAt:Date.now(),repeat:t.repeat,originalId:t.id,
           taskTotal:t.taskTotal||0, taskDone:t.taskDone||0, dailyTarget:t.dailyTarget||0,
           subtasks: t.subtasks? t.subtasks.map(s=>({title:s.title,done:false})) : []
         });
+        todaySigs.add(sig);
+        created=true;
       }
     });
+    DB.tasks[m.key]=list;
   });
-  saveDB();
+  if(created) saveDB();
 }
 
 // ============================================================
@@ -3986,19 +4052,38 @@ function init(){
 }
 
 async function autoPullOnInit(deviceId){
+  _isPulling = true;
   try{
     const resp = await fetch(API_BASE + '/api/sync/pull?deviceId=' + encodeURIComponent(deviceId));
     if(resp.status !== 200) return;
     const result = await resp.json();
     if(!result.success) return;
     // 比较云端更新时间是否比本地新
-    const localTime = localStorage.getItem(STORAGE_KEY + '_lastPush') || 0;
+    const localTime = parseInt(localStorage.getItem(STORAGE_KEY + '_lastPush') || '0', 10);
     const cloudTime = new Date(result.updatedAt).getTime();
     if(cloudTime > localTime){
       const merged = mergeDB(DB, result.data);
+      // 合并后再跑一次任务模糊去重，确保万无一失
+      if(merged.tasks){
+        Object.keys(merged.tasks).forEach(modKey=>{
+          const arr = merged.tasks[modKey];
+          if(!arr || arr.length<2) return;
+          const seen = new Map();
+          const kept = [];
+          const sorted = arr.slice().sort((a,b)=>(b.createdAt||0)-(a.createdAt||0));
+          sorted.forEach(t=>{
+            const sig = `${t.title||''}|${t.date||''}|${t.originalId||(t.id||'')}`;
+            if(!seen.has(sig)){ seen.set(sig, true); kept.push(t); }
+          });
+          merged.tasks[modKey] = kept;
+        });
+      }
       DB = merged;
+      // 直接写 localStorage，不触发 cloudPushAsync（_isPulling 仍为 true）
       localStorage.setItem(STORAGE_KEY, JSON.stringify(DB));
-      console.log('☁️ 自动合并云端数据完成');
+      // 更新本地推送时间为云端时间，避免下次又判定为「云端更新」反复合并
+      localStorage.setItem(STORAGE_KEY + '_lastPush', cloudTime);
+      console.log('☁️ 自动合并云端数据完成（已去重）');
       // 如果当前正在首页，刷新
       if(document.querySelector('.nav-item.active')?.dataset.page==='home'){
         renderHome();
@@ -4008,6 +4093,9 @@ async function autoPullOnInit(deviceId){
   }catch(e){
     // 静默失败
     console.log('☁️ 自动拉取不可用:', e.message);
+  }finally{
+    // 延迟释放标志，确保 saveDB 触发的 cloudPushAsync 也被跳过
+    setTimeout(()=>{ _isPulling = false; }, 2000);
   }
 }
 init();
