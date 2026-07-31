@@ -3816,22 +3816,29 @@ function mergeDB(local, remote){
   }
 
   // ===== 任务模糊去重（关键）=====
-  // 同一模块下：同 title 视为重复，只保留最新一条
-  // （因为用户的「模板任务」创建时就带 date，无法靠 date/originalId 区分；
-  //  同标题基本就是同一个任务的重复定义，合并为 1 个最安全）
+  // 模板与实例分开去重：
+  //   - 模板之间：按 title 去重（防止重复建模板）
+  //   - 实例之间：按 originalId+date 去重（防止同日同模板生成多个实例）
+  // 注意：模板和实例允许同标题共存（实例是从模板生成的）
   if(merged.tasks){
     Object.keys(merged.tasks).forEach(modKey=>{
       const arr = merged.tasks[modKey];
       if(!arr || arr.length<2) return;
-      const seen = new Map();
+      const seenTmpl = new Map();
+      const seenInst = new Map();
       const kept = [];
       const sorted = arr.slice().sort((a,b)=>(b.createdAt||0)-(a.createdAt||0));
       sorted.forEach(t=>{
-        const sig = t.title||''; // 仅按标题去重
-        if(!seen.has(sig)){
-          seen.set(sig, true);
-          kept.push(t);
+        const isTmpl = !t.originalId || t.originalId === t.id;
+        let sig, map;
+        if(isTmpl){
+          sig = `tmpl|${t.title||''}`;
+          map = seenTmpl;
+        } else {
+          sig = `inst|${t.originalId}|${t.date||''}`;
+          map = seenInst;
         }
+        if(!map.has(sig)){ map.set(sig, true); kept.push(t); }
       });
       merged.tasks[modKey] = kept;
     });
@@ -3933,12 +3940,24 @@ function _silentDedupTasks(){
   Object.keys(DB.tasks||{}).forEach(modKey=>{
     const arr = DB.tasks[modKey]||[];
     if(arr.length < 2) return;
-    const seen = new Map();
+    // 区分两类：模板（无 originalId 或 originalId===id）和 实例（有 originalId 且 !==id）
+    // 模板之间按 title 去重（防止重复建模板）
+    // 实例之间按 originalId+date 去重（防止同日同模板生成多个实例）
+    const seenTmpl = new Map();
+    const seenInst = new Map();
     const kept = [];
     const sorted = arr.slice().sort((a,b)=>(b.createdAt||0)-(a.createdAt||0));
     sorted.forEach(t=>{
-      const sig = t.title||'';
-      if(!seen.has(sig)){ seen.set(sig, true); kept.push(t); }
+      const isTmpl = !t.originalId || t.originalId === t.id;
+      let sig, map;
+      if(isTmpl){
+        sig = `tmpl|${t.title||''}`;
+        map = seenTmpl;
+      } else {
+        sig = `inst|${t.originalId}|${t.date||''}`;
+        map = seenInst;
+      }
+      if(!map.has(sig)){ map.set(sig, true); kept.push(t); }
       else removed++;
     });
     DB.tasks[modKey] = kept;
@@ -3976,16 +3995,20 @@ function dedupAllData(){
     DB.records[modKey] = dedupArray(DB.records[modKey]||[]);
   });
 
-  // tasks 逐模块去重：同 title 视为重复，保留最新一条
+  // tasks 逐模块去重：模板按 title，实例按 originalId+date
   Object.keys(DB.tasks||{}).forEach(modKey=>{
     const arr = DB.tasks[modKey]||[];
     if(arr.length < 2) return;
-    const seen = new Map();
+    const seenTmpl = new Map();
+    const seenInst = new Map();
     const kept = [];
     const sorted = arr.slice().sort((a,b)=>(b.createdAt||0)-(a.createdAt||0));
     sorted.forEach(t=>{
-      const sig = t.title||'';
-      if(!seen.has(sig)){ seen.set(sig, true); kept.push(t); }
+      const isTmpl = !t.originalId || t.originalId === t.id;
+      let sig, map;
+      if(isTmpl){ sig = `tmpl|${t.title||''}`; map = seenTmpl; }
+      else { sig = `inst|${t.originalId}|${t.date||''}`; map = seenInst; }
+      if(!map.has(sig)){ map.set(sig, true); kept.push(t); }
       else removed++;
     });
     DB.tasks[modKey] = kept;
@@ -4017,17 +4040,38 @@ function generateRecurringTasks(){
         todayTitles.add(x.title);
       }
     });
-    // 仅对「模板」生成：无 originalId（原始任务）且有 repeat
-    // 用 title 做幂等键，同标题的多个模板只生成一次
+    // 收集所有「源任务 id」集合（用于判断实例的源是否还存在）
+    // 「源任务」= 没有 originalId 或 originalId===自身 id 的任务
+    const sourceIds = new Set();
+    list.forEach(t=>{
+      if(!t.originalId || t.originalId === t.id){
+        sourceIds.add(t.id);
+      }
+    });
+    // 处理每个有 repeat 的任务（既包括模板，也包括已完成/丢失源的实例）
     const generatedTitles = new Set();
     list.forEach(t=>{
       if(!t.repeat||t.repeat==='none') return;
-      // 已生成的实例（有 originalId 且不等于自身 id）跳过
-      if(t.originalId && t.originalId!==t.id) return;
-      // 今天是否已存在同标题任务（任何来源）
+      // 今天是否已存在同标题任务
       if(todayTitles.has(t.title)) return;
       // 本次 init 是否已为该标题生成过
       if(generatedTitles.has(t.title)) return;
+
+      // 决定 effectiveOriginalId（用于新实例的 originalId 字段）
+      let effectiveOriginalId;
+      const isTmpl = !t.originalId || t.originalId === t.id;
+      if(isTmpl){
+        effectiveOriginalId = t.id;
+      } else {
+        // 实例：检查其源是否还存在
+        if(sourceIds.has(t.originalId)){
+          // 源还在，按理实例不该再生，跳过（防重复）
+          return;
+        }
+        // 源已丢失（被去重误删）→ 把这个实例当作新的源，原始 id 用自身
+        effectiveOriginalId = t.id;
+      }
+
       let shouldCreate=false;
       if(t.repeat==='daily') shouldCreate=true;
       else if(t.repeat==='weekday') shouldCreate=(dayOfWeek>=1&&dayOfWeek<=5);
@@ -4036,7 +4080,7 @@ function generateRecurringTasks(){
       if(shouldCreate){
         list.push({
           id:uid(),title:t.title,targetMin:t.targetMin,actualMin:0,isDone:false,
-          date:today,createdAt:Date.now(),repeat:t.repeat,originalId:t.id,
+          date:today,createdAt:Date.now(),repeat:t.repeat,originalId:effectiveOriginalId,
           taskTotal:t.taskTotal||0, taskDone:t.taskDone||0, dailyTarget:t.dailyTarget||0,
           subtasks: t.subtasks? t.subtasks.map(s=>({title:s.title,done:false})) : []
         });
@@ -4103,7 +4147,7 @@ async function autoPullOnInit(deviceId){
       DB = merged;
       // 合并后立即静默去重（_isPulling=true，不会触发回推）
       _silentDedupTasks();
-      // 直接写 localStorage，不触发 cloudPushAsync（_isPulling 仍为 true）
+      // 即使没去重（_silentDedupTasks 没 saveDB），也要持久化合并后的数据
       localStorage.setItem(STORAGE_KEY, JSON.stringify(DB));
       // 更新本地推送时间为云端时间，避免下次又判定为「云端更新」反复合并
       localStorage.setItem(STORAGE_KEY + '_lastPush', cloudTime);
