@@ -1740,6 +1740,13 @@ function addTask(key){
   const repeat=document.getElementById('newTaskRepeat').value;
   const subs=document.getElementById('newTaskSubs').value.split(/[,，、]/).map(s=>s.trim()).filter(Boolean);
   const subtasks = subs.map(s=>({title:s,done:false}));
+
+  // 防止重复添加同标题模板任务
+  const dup = (DB.tasks[key]||[]).find(t => !t.date && !t.originalId && t.title === title);
+  if(dup){
+    if(!confirm(`已存在同名模板任务「${title}」\n（${dup.targetMin||0}分钟/次，${dup.repeat==='none'?'不重复':dup.repeat}）\n\n确定还是要新增一个吗？`)) return;
+  }
+
   DB.tasks[key].push({
     id:uid(),
     title:title,
@@ -3809,17 +3816,29 @@ function mergeDB(local, remote){
   }
 
   // ===== 任务模糊去重（关键）=====
-  // 同一模块下：同 title + 同 date + 同 originalId 视为重复，只保留最新一条
+  // 同一模块下：按内容签名判重
+  //   - 重复任务实例：有 originalId → 签名 title+date+originalId
+  //   - 模板任务（无 date 无 originalId）：仅按 title 去重（防止手动重复建任务）
+  //   - 单次任务（有 date 无 originalId）：按 title+date 去重
   if(merged.tasks){
     Object.keys(merged.tasks).forEach(modKey=>{
       const arr = merged.tasks[modKey];
       if(!arr || arr.length<2) return;
       const seen = new Map();
       const kept = [];
-      // 按 createdAt 降序，保留最新的
       const sorted = arr.slice().sort((a,b)=>(b.createdAt||0)-(a.createdAt||0));
       sorted.forEach(t=>{
-        const sig = `${t.title||''}|${t.date||''}|${t.originalId||(t.id||'')}`;
+        let sig;
+        if(t.originalId && t.date){
+          // 重复任务实例
+          sig = `inst|${t.title||''}|${t.date||''}|${t.originalId}`;
+        } else if(!t.date && !t.originalId){
+          // 模板任务：仅按标题去重
+          sig = `tmpl|${t.title||''}`;
+        } else {
+          // 单次任务（有日期）
+          sig = `once|${t.title||''}|${t.date||''}`;
+        }
         if(!seen.has(sig)){
           seen.set(sig, true);
           kept.push(t);
@@ -3944,7 +3963,7 @@ function dedupAllData(){
     DB.records[modKey] = dedupArray(DB.records[modKey]||[]);
   });
 
-  // tasks 逐模块去重：同 title + 同 date + 同 originalId 视为重复，保留最新
+  // tasks 逐模块去重：按内容签名（模板按标题、实例按 title+date+originalId、单次按 title+date）
   Object.keys(DB.tasks||{}).forEach(modKey=>{
     const arr = DB.tasks[modKey]||[];
     if(arr.length < 2) return;
@@ -3952,7 +3971,14 @@ function dedupAllData(){
     const kept = [];
     const sorted = arr.slice().sort((a,b)=>(b.createdAt||0)-(a.createdAt||0));
     sorted.forEach(t=>{
-      const sig = `${t.title||''}|${t.date||''}|${t.originalId||(t.id||'')}`;
+      let sig;
+      if(t.originalId && t.date){
+        sig = `inst|${t.title||''}|${t.date||''}|${t.originalId}`;
+      } else if(!t.date && !t.originalId){
+        sig = `tmpl|${t.title||''}`;
+      } else {
+        sig = `once|${t.title||''}|${t.date||''}`;
+      }
       if(!seen.has(sig)){ seen.set(sig, true); kept.push(t); }
       else removed++;
     });
@@ -4063,7 +4089,7 @@ async function autoPullOnInit(deviceId){
     const cloudTime = new Date(result.updatedAt).getTime();
     if(cloudTime > localTime){
       const merged = mergeDB(DB, result.data);
-      // 合并后再跑一次任务模糊去重，确保万无一失
+      // 合并后再跑一次任务模糊去重（mergeDB 内已做，这里保险起见再跑一次）
       if(merged.tasks){
         Object.keys(merged.tasks).forEach(modKey=>{
           const arr = merged.tasks[modKey];
@@ -4072,7 +4098,14 @@ async function autoPullOnInit(deviceId){
           const kept = [];
           const sorted = arr.slice().sort((a,b)=>(b.createdAt||0)-(a.createdAt||0));
           sorted.forEach(t=>{
-            const sig = `${t.title||''}|${t.date||''}|${t.originalId||(t.id||'')}`;
+            let sig;
+            if(t.originalId && t.date){
+              sig = `inst|${t.title||''}|${t.date||''}|${t.originalId}`;
+            } else if(!t.date && !t.originalId){
+              sig = `tmpl|${t.title||''}`;
+            } else {
+              sig = `once|${t.title||''}|${t.date||''}`;
+            }
             if(!seen.has(sig)){ seen.set(sig, true); kept.push(t); }
           });
           merged.tasks[modKey] = kept;
