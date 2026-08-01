@@ -2836,13 +2836,15 @@ function renderCalendar(moduleKey){
   for(let d=1;d<=daysInMonth;d++){
     const ds=`${year}-${String(month+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
     let hasData=false;
+    let clickAttr='';
     if(moduleKey==='yundong'){
       hasData=getDayModuleDuration(ds,'yundong')>0;
     }else if(moduleKey==='qingxu'){
       hasData=(DB.moods||[]).some(m=>m.date===ds);
+      if(hasData) clickAttr=`onclick="showMoodDetail('${ds}')" style="cursor:pointer"`;
     }
     const isToday=ds===today;
-    html+=`<div class="cal-day ${hasData?'has-data':''} ${isToday?'today':''}">${d}</div>`;
+    html+=`<div class="cal-day ${hasData?'has-data':''} ${isToday?'today':''}" ${clickAttr}>${d}</div>`;
   }
   html+='</div>';
   return html;
@@ -3006,6 +3008,27 @@ function renderQingxuPage(){
     html+='</div>';
   }
 
+  // 历史心情记录列表
+  const allMoodsSorted=(DB.moods||[]).slice().sort((a,b)=>(b.timestamp||0)-(a.timestamp||0));
+  if(allMoodsSorted.length>0){
+    html+='<div class="section-title"><span class="st-icon">📜</span>历史心情记录</div>';
+    html+='<div class="card" style="padding:0;overflow:hidden;">';
+    allMoodsSorted.forEach((mo,i)=>{
+      const moodObj=MOODS.find(m=>m.label===mo.mood);
+      const energyStars='⭐'.repeat(mo.energy||0)+'☆'.repeat(5-(mo.energy||0));
+      const isLast = i===allMoodsSorted.length-1;
+      html+=`<div style="padding:12px 14px;${isLast?'':'border-bottom:1px solid var(--bg-deep);'}cursor:pointer;" onclick="showMoodDetail('${mo.date}')">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+          <span style="font-size:14px;font-weight:700;">${moodObj?moodObj.icon:'🌈'} ${mo.mood||'—'}</span>
+          <span style="font-size:11px;color:var(--text-sec);">${mo.date} 周${getWeekday(mo.date)}</span>
+        </div>
+        <div style="font-size:11px;color:var(--blue);margin-bottom:4px;">${energyStars}</div>
+        ${mo.note?`<div style="font-size:12px;color:var(--text-sec);line-height:1.5;">${mo.note}</div>`:''}
+      </div>`;
+    });
+    html+='</div>';
+  }
+
   html+=chartSectionHTML('qingxu');
   document.getElementById('page-qingxu').innerHTML=html;
 }
@@ -3039,6 +3062,32 @@ function saveMoodRecord(){
   closeBottomSheet();
   showToast('🎀 心情已记录~');
   renderQingxuPage();
+}
+
+// 查看某天的心情详情
+function showMoodDetail(date){
+  const moods=(DB.moods||[]).filter(mo=>mo.date===date).sort((a,b)=>(a.timestamp||0)-(b.timestamp||0));
+  if(moods.length===0){
+    showToast('该日期无心情记录');
+    return;
+  }
+  let html=`<h3>🌈 ${date} 周${getWeekday(date)} 心情记录</h3>`;
+  moods.forEach((mo,i)=>{
+    const moodObj=MOODS.find(m=>m.label===mo.mood);
+    const energyStars='⭐'.repeat(mo.energy||0)+'☆'.repeat(5-(mo.energy||0));
+    const ts = mo.timestamp ? new Date(mo.timestamp) : null;
+    const timeStr = ts ? ` ${String(ts.getHours()).padStart(2,'0')}:${String(ts.getMinutes()).padStart(2,'0')}` : '';
+    html+=`<div style="background:var(--bg-deep);border-radius:12px;padding:14px;margin-bottom:12px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+        <span style="font-size:20px;">${moodObj?moodObj.icon:'🌈'} <span style="font-size:15px;font-weight:700;">${mo.mood||'—'}</span></span>
+        ${ts?`<span style="font-size:11px;color:var(--text-sec);">${timeStr}</span>`:''}
+      </div>
+      <div style="font-size:13px;color:var(--blue);margin-bottom:8px;">⚡ 精力值：${energyStars} (${mo.energy||0}/5)</div>
+      ${mo.note?`<div style="font-size:13px;color:var(--text);line-height:1.6;background:#fff;border-radius:8px;padding:10px;margin-top:6px;">📝 ${mo.note}</div>`:'<div style="font-size:12px;color:var(--text-sec);">无碎碎念记录</div>'}
+    </div>`;
+  });
+  html+=`<button class="save-btn" onclick="closeBottomSheet()">关闭</button>`;
+  openBottomSheet(html);
 }
 
 // ============================================================
@@ -3084,22 +3133,27 @@ function renderFupanPage(){
   `;
   html+='</div>';
 
-  // 本周复盘速览
-  const weekReviews=(DB.reviews||[]).filter(r=>{
-    const days=last7Days();return days.includes(r.date);
-  }).sort((a,b)=>b.date.localeCompare(a.date));
-  if(weekReviews.length>0){
-    html+='<div class="section-title"><span class="st-icon">📅</span>本周复盘速览</div>';
-    html+='<div class="card"><div class="week-review-scroll">';
-    weekReviews.forEach(r=>{
-      html+=`<div class="week-review-card">
-        <div class="wrc-date">${r.date.slice(5)} 周${getWeekday(r.date)}</div>
-        <div class="wrc-content">⭐ ${r.best||'—'}</div>
-        <div class="wrc-content">⚠️ ${r.interfere||'—'}</div>
-        <div class="wrc-content">💡 ${r.improve||'—'}</div>
+  // 历史复盘记录（全部，可点击查看详情）
+  const allReviews=(DB.reviews||[]).slice().sort((a,b)=>b.date.localeCompare(a.date));
+  if(allReviews.length>0){
+    html+='<div class="section-title"><span class="st-icon">📜</span>历史复盘记录</div>';
+    // 月份筛选
+    const months=[...new Set(allReviews.map(r=>r.date.slice(0,7)))];
+    html+=`<div class="card" style="padding:0;overflow:hidden;">`;
+    allReviews.forEach((r,i)=>{
+      const isLast = i===allReviews.length-1;
+      const hasFull = r.signal||r.words||r.durationMin;
+      html+=`<div style="padding:12px 14px;${isLast?'':'border-bottom:1px solid var(--bg-deep);'}cursor:pointer;" onclick="showFupanDetail('${r.id}')">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+          <span style="font-size:13px;font-weight:700;color:var(--blue);">${r.date} 周${getWeekday(r.date)}</span>
+          ${r.durationMin?`<span style="font-size:11px;color:var(--text-sec);">⏱ ${r.durationMin}min</span>`:''}
+        </div>
+        <div style="font-size:12px;color:var(--text);line-height:1.5;">⭐ ${r.best||'—'}</div>
+        <div style="font-size:12px;color:var(--text-sec);line-height:1.5;margin-top:2px;">⚠️ ${r.interfere||'—'}</div>
+        ${hasFull?`<div style="font-size:11px;color:var(--text-sec);margin-top:4px;">点击查看完整复盘 →</div>`:''}
       </div>`;
     });
-    html+='</div></div>';
+    html+=`</div>`;
   }
 
   // 一键生成周复盘报告
@@ -3129,6 +3183,35 @@ function saveFupanRecord(){
   showToast('🎀 复盘已保存~');
   renderFupanPage();
 }
+
+// 查看某条复盘的完整详情
+function showFupanDetail(recId){
+  const r=(DB.reviews||[]).find(x=>x.id===recId);
+  if(!r){
+    showToast('未找到该复盘记录');
+    return;
+  }
+  let html=`<h3>💌 ${r.date} 周${getWeekday(r.date)} 复盘详情</h3>`;
+  if(r.durationMin){
+    html+=`<div style="text-align:center;font-size:13px;color:var(--text-sec);margin-bottom:14px;">⏱ 复盘用时 ${r.durationMin} 分钟</div>`;
+  }
+  const fields=[
+    {icon:'⭐',label:'今日最佳',val:r.best},
+    {icon:'⚠️',label:'最大干扰',val:r.interfere},
+    {icon:'🤔',label:'身体/情绪信号',val:r.signal},
+    {icon:'💡',label:'明日只改1件事',val:r.improve},
+    {icon:'💌',label:'给自己的一句话',val:r.words}
+  ];
+  fields.forEach(f=>{
+    html+=`<div style="background:var(--bg-deep);border-radius:12px;padding:12px 14px;margin-bottom:10px;">
+      <div style="font-size:12px;color:var(--text-sec);font-weight:700;margin-bottom:6px;">${f.icon} ${f.label}</div>
+      <div style="font-size:13px;color:var(--text);line-height:1.6;">${f.val||'<span style="color:var(--text-sec);">—</span>'}</div>
+    </div>`;
+  });
+  html+=`<button class="save-btn" onclick="closeBottomSheet()">关闭</button>`;
+  openBottomSheet(html);
+}
+
 function generateWeekReport(){
   const days=last7Days();
   const moduleDurations=MODULES.map(m=>({name:m.name,icon:m.icon,dur:getWeekModuleDuration(m.key)}));
