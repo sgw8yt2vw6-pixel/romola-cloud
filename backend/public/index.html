@@ -991,13 +991,23 @@ function renderPage(key){
 function getModuleTotals(moduleKey){
   const list = DB.tasks[moduleKey]||[];
   let total = 0, done = 0;
-  list.forEach(t=>{
-    if(t.taskTotal){
-      total += parseInt(t.taskTotal)||0;
-      done  += parseInt(t.taskDone)||0;
-    }
+  // 同标题任务去重后累加（避免同标题的多个副本把 taskDone 算多次）
+  const seenTmpl = new Map();
+  const sortedList = list.slice().sort((a,b)=>(b.createdAt||0)-(a.createdAt||0));
+  sortedList.forEach(t=>{
+    if(!t.taskTotal) return;
+    const isTmpl = !t.originalId || t.originalId === t.id;
+    const sig = isTmpl ? `tmpl|${t.title||''}` : `inst|${t.originalId}|${t.date||''}`;
+    // 仅模板按 title 去重（避免历史重复任务的 taskDone 重复计入）
+    // 实例按 originalId+date 去重
+    if(isTmpl && seenTmpl.has(sig)) return;
+    seenTmpl.set(sig, true);
+    total += parseInt(t.taskTotal)||0;
+    let d = parseInt(t.taskDone)||0;
+    // 防止异常数据：taskDone 不能超过 taskTotal
+    if(d > (parseInt(t.taskTotal)||0)) d = parseInt(t.taskTotal)||0;
+    done += d;
   });
-  // 也兼容：从每日 record 累计（按 total/correct 累加到当前未完成任务）
   return {total, done};
 }
 function getGrandTaskTotals(){
@@ -3607,6 +3617,7 @@ function renderSettingsPage(){
         <div>💪 体重记录：${(DB.weight||[]).length} 条</div>
         <div>🏆 模考记录：${(DB.mokao||[]).length} 条</div>
       </div>
+      <button class="data-action-btn" style="background:var(--light-yellow);color:var(--dark);margin-top:8px;" onclick="showTaskProgressDebug()">🔍 查看任务进程明细</button>
     </div>
 
     <div class="card" style="text-align:center;">
@@ -3622,6 +3633,38 @@ function renderSettingsPage(){
 //  云端同步（基于 Supabase + Railway 后端）
 //  真·多设备同步：数据存云端 PostgreSQL，多设备共享
 // ============================================================
+
+// 调试：显示每个任务对总进程的贡献
+function showTaskProgressDebug(){
+  let html = `<h3>🔍 任务进程明细</h3>`;
+  html += `<div style="font-size:11px;color:var(--text-sec);margin-bottom:10px;">查看每个任务对总计的贡献，删除异常条目。</div>`;
+  let grandTotal=0, grandDone=0;
+  MODULES.forEach(m=>{
+    const list = DB.tasks[m.key]||[];
+    const withTotal = list.filter(t=>t.taskTotal);
+    if(withTotal.length === 0) return;
+    html += `<div style="margin-top:12px;font-weight:700;color:var(--red);">${m.icon} ${m.name}</div>`;
+    const seenT = new Set();
+    const sortedList = withTotal.slice().sort((a,b)=>(b.createdAt||0)-(a.createdAt||0));
+    sortedList.forEach((t,i)=>{
+      const isTmpl = !t.originalId || t.originalId === t.id;
+      const dup = isTmpl && seenT.has(t.title);
+      const isDup = isTmpl ? (seenT.has(t.title) ? ' ⚠️重复' : (seenT.add(t.title), '')) : ' 📅实例';
+      grandTotal += parseInt(t.taskTotal)||0;
+      grandDone += parseInt(t.taskDone)||0;
+      const done = parseInt(t.taskDone)||0;
+      const total = parseInt(t.taskTotal)||0;
+      html += `<div style="display:flex;justify-content:space-between;align-items:center;font-size:11px;padding:5px 8px;background:${i%2?'#fafafa':'#fff'};border-radius:4px;margin-top:2px;">
+        <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${t.title}${isDup}</span>
+        <span style="color:var(--blue);font-weight:700;margin-left:8px;">${done}/${total}</span>
+        <button class="task-btn task-btn-del" style="font-size:10px;padding:2px 6px;margin-left:6px;" onclick="deleteTask('${m.key}','${t.id}');showTaskProgressDebug();">🗑️</button>
+      </div>`;
+    });
+  });
+  html += `<div style="margin-top:14px;padding:10px;background:var(--light-yellow);border-radius:6px;font-weight:700;text-align:center;">总计：${grandDone}/${grandTotal}</div>`;
+  html += `<div class="bs-close" onclick="closeBottomSheet()">关闭</div>`;
+  openBottomSheet(html);
+}
 function openCloudSync(){
   const curId = localStorage.getItem(SYNC_KEY) || '';
   const statusEl = `
