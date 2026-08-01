@@ -2146,27 +2146,56 @@ function accuracyTrendHTML(key){
 //  图表渲染（时间统计 + 总任务进度可视化）
 // ============================================================
 function chartSectionHTML(key){
-  const days=last7Days();
+  const totalH=(getTotalModuleDuration(key)/60).toFixed(1);
+  // 为每个模块实例维护独立的图表时间范围
+  if(!window._chartRanges) window._chartRanges={};
+  if(!window._chartRanges[key]) window._chartRanges[key]='7';
+  const range=window._chartRanges[key];
+
+  let days;
+  if(range==='7') days=last7Days();
+  else if(range==='30') days=last30Days();
+  else days=getAllDatesWithActivity(key);
+
   const data=days.map(d=>({date:d,dur:getDayModuleDuration(d,key)}));
   const maxDur=Math.max(...data.map(d=>d.dur),1);
-  const totalH=(getTotalModuleDuration(key)/60).toFixed(1);
 
   let html='<div class="section-title"><span class="st-icon">📈</span>时间统计</div>';
 
-  // 柱状图
+  // 柱状图（可切换时间范围）
   html+='<div class="chart-container">';
-  html+='<div style="font-size:13px;color:var(--text-sec);">最近7天每日专注时长</div>';
-  html+='<div class="bar-chart">';
-  data.forEach(d=>{
-    const h=(d.dur/maxDur)*100;
-    const valLabel = d.dur>0 ? `<div class="bar-val">${Math.round(d.dur/60)}'</div>` : '';
-    html+=`<div class="bar-col"><div class="bar" style="height:${h}%;" title="${fmtTime(d.dur)}">${valLabel}</div><div class="bar-label">${getWeekday(d.date)}</div></div>`;
-  });
-  html+='</div>';
+  html+=`<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+    <span style="font-size:13px;color:var(--text-sec);font-weight:700;">每日专注时长</span>
+    <div style="display:flex;gap:4px;">
+      ${['7','30','all'].map(r=>`<div class="stat-tab ${range===r?'active':''}" style="padding:3px 10px;font-size:11px;" onclick="switchChartRange('${key}','${r}')">${r==='7'?'7天':r==='30'?'30天':'全部'}</div>`).join('')}
+    </div>
+  </div>`;
+  if(data.length>0){
+    html+='<div class="bar-chart">';
+    // 全部模式超过31天时，按周聚合显示
+    if(days.length>31){
+      const weeklyData=aggregateByWeek(data);
+      const maxW=Math.max(...weeklyData.map(d=>d.dur),1);
+      weeklyData.forEach(d=>{
+        const h=(d.dur/maxW)*100;
+        const valLabel = d.dur>0 ? `<div class="bar-val">${fmtTime(d.dur)}</div>` : '';
+        html+=`<div class="bar-col"><div class="bar" style="height:${h}%;" title="${d.label}: ${fmtTime(d.dur)}">${valLabel}</div><div class="bar-label">${d.label}</div></div>`;
+      });
+    }else{
+      data.forEach(d=>{
+        const h=(d.dur/maxDur)*100;
+        const valLabel = d.dur>0 ? `<div class="bar-val">${Math.round(d.dur/60)}'</div>` : '';
+        html+=`<div class="bar-col"><div class="bar" style="height:${h}%;" title="${d.date}: ${fmtTime(d.dur)}">${valLabel}</div><div class="bar-label">${d.date.slice(5)}</div></div>`;
+      });
+    }
+    html+='</div>';
+  }else{
+    html+='<div style="text-align:center;color:var(--text-sec);padding:20px;font-size:13px;">暂无数据</div>';
+  }
   html+=`<div style="text-align:center;font-size:13px;color:var(--blue);margin-top:10px;font-weight:700;">已累计专注 <strong>${totalH}</strong> 小时</div>`;
   html+='</div>';
 
-  // 总任务进程可视化图表（参考图片样式：横向进度条列表）
+  // 总任务进程可视化图表
   html += renderTaskTotalsChartHTML();
 
   // 本周各模块对比
@@ -2183,6 +2212,127 @@ function chartSectionHTML(key){
 
   html+=`<button class="save-btn blue" onclick="goPage('stats')">📊 查看全局统计</button>`;
   return html;
+}
+function switchChartRange(key,range){
+  if(!window._chartRanges) window._chartRanges={};
+  window._chartRanges[key]=range;
+  // 重新渲染当前页面
+  const pageMap={shenlun:renderShenlunPage,mokao:renderMokaoPage,yundong:renderYundongPage,shizheng:renderShizhengPage,qingxu:renderQingxuPage,fupan:renderFupanPage};
+  if(pageMap[key]) pageMap[key]();
+}
+function getAllDatesWithActivity(key){
+  const dates=new Set();
+  Object.keys(DB.manualDuration||{}).forEach(d=>{ if(DB.manualDuration[d]&&DB.manualDuration[d][key]) dates.add(d); });
+  (DB.tasks[key]||[]).forEach(t=>{ if(t.isDone&&t.actualMin) dates.add(t.date); });
+  (DB.records[key]||[]).forEach(r=>{ if(r.durationMin) dates.add(r.date); });
+  return [...dates].sort();
+}
+function aggregateByWeek(data){
+  // data: [{date,dur}] 按周聚合并求和
+  const weeks={};
+  data.forEach(d=>{
+    const date=new Date(d.date+'T00:00:00');
+    // 找到本周的周一
+    const day=date.getDay()||7;
+    const monday=new Date(date);
+    monday.setDate(date.getDate()-day+1);
+    const weekKey=dateStr(monday);
+    if(!weeks[weekKey]) weeks[weekKey]={date:weekKey,dur:0};
+    weeks[weekKey].dur+=d.dur;
+  });
+  return Object.values(weeks).sort((a,b)=>a.date.localeCompare(b.date)).map(w=>{
+    const d=new Date(w.date+'T00:00:00');
+    return {label:(d.getMonth()+1)+'/'+d.getDate(), dur:w.dur, date:w.date};
+  });
+}
+
+// ============================================================
+//  通用历史记录列表（所有模块通用）
+// ============================================================
+function renderHistoryList(moduleKey){
+  const m=MODULES.find(x=>x.key===moduleKey);
+  let records=(DB.records[moduleKey]||[]).slice().sort((a,b)=>(b.timestamp||b.date||'').localeCompare(a.timestamp||a.date||''));
+  if(records.length===0) return '';
+
+  let html=`<div class="section-title"><span class="st-icon">📜</span>历史记录（${records.length}条）</div>`;
+  html+=`<div class="card" style="padding:0;overflow:hidden;">`;
+  records.forEach((r,i)=>{
+    const isLast=i===records.length-1;
+    const date=r.date||'';
+    const dur=r.durationMin?`⏱${r.durationMin}min `:'';
+    let summary='';
+    if(moduleKey==='shenlun'){
+      if(r.subType==='tingke') summary=`📺 ${r.course||'—'} ${r.teacher?'· '+r.teacher:''}`;
+      else if(r.subType==='zuoti') summary=`✍️ ${r.qtype||''} ${r.source?'· '+r.source:''} ${r.score!=null?'· '+r.score+'分':''}`;
+      else if(r.subType==='jilei') summary=`📝 ${r.cat||''} ${r.content?(r.content.slice(0,30)+(r.content.length>30?'...':'')):''}`;
+    }else if(moduleKey==='shizheng'){
+      summary=`📰 ${r.source||'—'} ${r.cat?'· '+r.cat:''} ${r.content?(r.content.slice(0,30)+(r.content.length>30?'...':'')):''}`;
+    }else if(moduleKey==='yundong'){
+      const acts=(r.acts||[]).map(a=>a.name+':'+a.val).join(' ');
+      summary=`${r.weight?'⚖️'+r.weight+'kg ':''}🏃 ${acts||'运动记录'}`;
+    }
+    html+=`<div style="padding:10px 14px;${isLast?'':'border-bottom:1px solid var(--bg-deep);'}cursor:pointer;" onclick="showRecordDetail('${moduleKey}','${r.id}')">
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <span style="font-size:12px;font-weight:700;color:var(--blue);">${date} 周${getWeekday(date)}</span>
+        <span style="font-size:11px;color:var(--text-sec);">${dur}</span>
+      </div>
+      <div style="font-size:12px;color:var(--text);line-height:1.5;margin-top:2px;">${summary||'查看详情'}</div>
+    </div>`;
+  });
+  html+=`</div>`;
+  return html;
+}
+
+// 查看某条记录的详情
+function showRecordDetail(moduleKey,recId){
+  const r=(DB.records[moduleKey]||[]).find(x=>x.id===recId);
+  if(!r){ showToast('未找到该记录'); return; }
+  const m=MODULES.find(x=>x.key===moduleKey);
+  let html=`<h3>${m.icon} ${r.date} 周${getWeekday(r.date)} ${m.name}记录</h3>`;
+  if(r.durationMin){
+    html+=`<div style="text-align:center;font-size:13px;color:var(--text-sec);margin-bottom:14px;">⏱ 用时 ${r.durationMin} 分钟</div>`;
+  }
+  const fields=[];
+  if(moduleKey==='shenlun'){
+    if(r.subType==='tingke'){
+      fields.push({icon:'📺',label:'课程',val:r.course});
+      fields.push({icon:'👤',label:'讲师',val:r.teacher});
+      fields.push({icon:'💬',label:'今日收获',val:r.harvest});
+    }else if(r.subType==='zuoti'){
+      fields.push({icon:'📝',label:'题型',val:r.qtype});
+      fields.push({icon:'📚',label:'题目来源',val:r.source});
+      fields.push({icon:'💯',label:'自评分数',val:r.score!=null?r.score+'/100':''});
+      if(r.draftImg) fields.push({icon:'📷',label:'草稿图片',val:'<img src="'+r.draftImg+'" style="width:100%;border-radius:8px;">'});
+    }else if(r.subType==='jilei'){
+      fields.push({icon:'🏷',label:'分类',val:r.cat});
+      fields.push({icon:'📄',label:'内容',val:r.content});
+      fields.push({icon:'📚',label:'来源',val:r.source});
+    }
+  }else if(moduleKey==='shizheng'){
+    fields.push({icon:'📰',label:'阅读来源',val:r.source});
+    fields.push({icon:'🏷',label:'分类',val:r.cat});
+    fields.push({icon:'📄',label:'积累内容',val:r.content});
+    if(r.isQuote) fields.push({icon:'💎',label:'标记',val:'已标记为申论可用金句'});
+  }else if(moduleKey==='yundong'){
+    if(r.weight) fields.push({icon:'⚖️',label:'体重',val:r.weight+'kg'});
+    if(r.acts&&r.acts.length>0){
+      const actsText=r.acts.map(a=>`${a.name}: ${a.val}${a.name==='跳绳'?'个':'分钟'}`).join('；');
+      fields.push({icon:'🏃',label:'运动项目',val:actsText});
+    }
+  }
+  if(fields.length===0){
+    html+='<div style="text-align:center;color:var(--text-sec);padding:20px;font-size:13px;">该记录无详细内容</div>';
+  }else{
+    fields.forEach(f=>{
+      if(!f.val) return;
+      html+=`<div style="background:var(--bg-deep);border-radius:12px;padding:12px 14px;margin-bottom:10px;">
+        <div style="font-size:12px;color:var(--text-sec);font-weight:700;margin-bottom:6px;">${f.icon} ${f.label}</div>
+        <div style="font-size:13px;color:var(--text);line-height:1.6;">${f.val}</div>
+      </div>`;
+    });
+  }
+  html+=`<button class="save-btn" onclick="closeBottomSheet()">关闭</button>`;
+  openBottomSheet(html);
 }
 
 // 总任务进程可视化（每个模块任务总量进度 - 方块风格）
@@ -2260,6 +2410,7 @@ function renderShenlunPage(){
   html+='<div class="card" id="shenlun-record-card"></div>';
 
   html+=chartSectionHTML('shenlun');
+  html+=renderHistoryList('shenlun');
   html+=`<button class="save-btn blue" onclick="openMaterialLib('shenlun')">📖 查看我的申论素材库</button>`;
 
   document.getElementById('page-shenlun').innerHTML=html;
@@ -2566,6 +2717,27 @@ function renderMokaoPage(){
   html += renderMokaoSubAccuracyHTML();
 
   html+=chartSectionHTML('mokao');
+
+  // 模考历史记录列表
+  const mokaoHistory=(DB.mokao||[]).slice().sort((a,b)=>b.date.localeCompare(a.date));
+  if(mokaoHistory.length>0){
+    html+='<div class="section-title"><span class="st-icon">📜</span>模考历史记录</div>';
+    html+=`<div class="card" style="padding:0;overflow:hidden;">`;
+    mokaoHistory.forEach((r,i)=>{
+      const isLast=i===mokaoHistory.length-1;
+      html+=`<div style="padding:10px 14px;${isLast?'':'border-bottom:1px solid var(--bg-deep);'}cursor:pointer;" onclick="showMokaoDetail('${r.id}')">
+        <div style="display:flex;justify-content:space-between;align-items:center;">
+          <span style="font-size:12px;font-weight:700;color:var(--blue);">${r.date} 周${getWeekday(r.date)}</span>
+          ${r.total!=null?`<span style="font-size:14px;font-weight:800;color:var(--red);">${r.total}分</span>`:''}
+        </div>
+        <div style="font-size:11px;color:var(--text-sec);margin-top:2px;">
+          ${r.xingce!=null?'行测'+r.xingce:''} ${r.shenlun!=null?' 申论'+r.shenlun:''} ${r.durationMin?r.durationMin+'min':''}
+        </div>
+      </div>`;
+    });
+    html+=`</div>`;
+  }
+
   document.getElementById('page-mokao').innerHTML=html;
 }
 
@@ -2657,7 +2829,57 @@ function saveMokaoRecord(){
   renderMokaoPage();
 }
 
-// 折线图渲染
+// 查看模考记录详情
+function showMokaoDetail(recId){
+  const r=(DB.mokao||[]).find(x=>x.id===recId);
+  if(!r){ showToast('未找到该模考记录'); return; }
+  let html=`<h3>🏆 ${r.date} 周${getWeekday(r.date)} 模考详情</h3>`;
+  if(r.total!=null){
+    html+=`<div style="text-align:center;background:var(--light-red);border-radius:12px;padding:14px;margin-bottom:14px;">
+      <div style="font-size:12px;color:var(--text-sec);">模考总分</div>
+      <div style="font-size:36px;font-weight:900;color:var(--red);">${r.total}<span style="font-size:14px;">分</span></div>
+      <div style="font-size:12px;color:var(--blue);margin-top:4px;">行测 ${r.xingce||0} · 申论 ${r.shenlun||0}</div>
+    </div>`;
+  }
+  if(r.durationMin) html+=`<div style="font-size:13px;color:var(--text-sec);margin-bottom:10px;">⏱ 用时 ${r.durationMin} 分钟</div>`;
+  if(r.rank) html+=`<div style="font-size:13px;color:var(--text-sec);margin-bottom:10px;">📊 排名 ${r.rank}%</div>`;
+  // 行测各模块
+  if(r.xcSubs){
+    const xcList=Object.entries(r.xcSubs).filter(([k,v])=>v.total>0);
+    if(xcList.length>0){
+      html+=`<div style="font-size:13px;font-weight:700;color:var(--blue);margin:12px 0 6px;">📝 行测各模块</div>`;
+      html+=`<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">`;
+      xcList.forEach(([k,v])=>{
+        const acc=v.total>0?Math.round(v.correct/v.total*100):0;
+        html+=`<div style="background:var(--bg-deep);padding:8px;border-radius:8px;">
+          <div style="font-size:12px;font-weight:700;">${k}</div>
+          <div style="font-size:11px;color:var(--text-sec);">${v.correct}/${v.total}题</div>
+          <div style="font-size:14px;font-weight:800;color:var(--blue);">${acc}%</div>
+        </div>`;
+      });
+      html+=`</div>`;
+    }
+  }
+  // 申论各模块
+  if(r.slSubs){
+    const slList=Object.entries(r.slSubs).filter(([k,v])=>v.total>0);
+    if(slList.length>0){
+      html+=`<div style="font-size:13px;font-weight:700;color:var(--red);margin:12px 0 6px;">✏️ 申论各模块</div>`;
+      html+=`<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">`;
+      slList.forEach(([k,v])=>{
+        const acc=v.total>0?Math.round(v.correct/v.total*100):0;
+        html+=`<div style="background:var(--bg-deep);padding:8px;border-radius:8px;">
+          <div style="font-size:12px;font-weight:700;">${k}</div>
+          <div style="font-size:11px;color:var(--text-sec);">${v.correct}/${v.total}题</div>
+          <div style="font-size:14px;font-weight:800;color:var(--blue);">${acc}%</div>
+        </div>`;
+      });
+      html+=`</div>`;
+    }
+  }
+  html+=`<button class="save-btn" onclick="closeBottomSheet()">关闭</button>`;
+  openBottomSheet(html);
+}
 function renderLineChart(data,color,targetLine,targetLabel){
   if(!data||data.length===0) return '<div style="text-align:center;color:var(--text-sec);padding:20px;">暂无数据</div>';
   const values=data.map(d=>d.value);
@@ -2791,6 +3013,7 @@ function renderYundongPage(){
   html+='</div>';
 
   html+=chartSectionHTML('yundong');
+  html+=renderHistoryList('yundong');
   document.getElementById('page-yundong').innerHTML=html;
 }
 function saveYundongRecord(){
@@ -2900,6 +3123,7 @@ function renderShizhengPage(){
 
   html+=`<button class="save-btn blue" onclick="openMaterialLib('shizheng')">📖 查看时政素材库</button>`;
   html+=chartSectionHTML('shizheng');
+  html+=renderHistoryList('shizheng');
   document.getElementById('page-shizheng').innerHTML=html;
 }
 function selectRadio(el){
@@ -3406,8 +3630,9 @@ function renderStatsContent(){
   const sorted=[...moduleDurations].sort((a,b)=>b.dur-a.dur);
   const champion=sorted[0];
   const weak=sorted[sorted.length-1];
+  const championLabel=_statsTab==='today'?'今日':_statsTab==='week'?'本周':_statsTab==='month'?'本月':'全部';
   if(champion&&champion.dur>0){
-    html+=`<div class="champion-badge"><span style="font-size:24px;">👑</span><div><div style="font-size:13px;font-weight:700;">本周专注冠军</div><div style="font-size:12px;">${champion.icon} ${champion.name} - ${fmtTime(champion.dur)}</div></div></div>`;
+    html+=`<div class="champion-badge"><span style="font-size:24px;">👑</span><div><div style="font-size:13px;font-weight:700;">${championLabel}专注冠军</div><div style="font-size:12px;">${champion.icon} ${champion.name} - ${fmtTime(champion.dur)}</div></div></div>`;
   }
   if(weak&&weak.dur>=0&&sorted.length>1){
     html+=`<div class="weak-badge"><span style="font-size:24px;">💪</span><div><div style="font-size:13px;font-weight:700;color:var(--blue);">待加强模块</div><div style="font-size:12px;color:var(--text-sec);">${weak.icon} ${weak.name} - ${fmtTime(weak.dur)}</div></div></div>`;
@@ -3553,6 +3778,8 @@ function renderYinshiPage(){
       <div style="font-size:13px;color:var(--text-sec);margin-bottom:4px;font-weight:700;">最近7天热量趋势</div>
       ${renderDietChart()}
     </div>
+
+    ${renderDietHistory()}
   `;
 
   document.getElementById('page-yinshi').innerHTML=html;
@@ -3637,6 +3864,63 @@ function renderDietChart(){
   });
   html+='</div>';
   return html;
+}
+
+// 历史饮食记录列表
+function renderDietHistory(){
+  const diets=(DB.diet||[]).slice().sort((a,b)=>b.date.localeCompare(a.date));
+  if(diets.length===0) return '';
+  let html=`<div class="section-title"><span class="st-icon">📜</span>历史饮食记录（${diets.length}天）</div>`;
+  html+=`<div class="card" style="padding:0;overflow:hidden;">`;
+  diets.forEach((d,i)=>{
+    const isLast=i===diets.length-1;
+    const totalCal=(d.meals||[]).reduce((s,m)=>s+(m.calories||0),0);
+    const mealCount=(d.meals||[]).length;
+    html+=`<div style="padding:10px 14px;${isLast?'':'border-bottom:1px solid var(--bg-deep);'}cursor:pointer;" onclick="showDietDetail('${d.date}')">
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <span style="font-size:12px;font-weight:700;color:var(--blue);">${d.date} 周${getWeekday(d.date)}</span>
+        <span style="font-size:13px;font-weight:800;color:var(--red);">${totalCal} kcal</span>
+      </div>
+      <div style="font-size:11px;color:var(--text-sec);margin-top:2px;">
+        ${d.water?`💧${d.water}ml · `:''}${mealCount}项食物 · 点击查看详情
+      </div>
+    </div>`;
+  });
+  html+=`</div>`;
+  return html;
+}
+
+// 查看某天饮食详情
+function showDietDetail(date){
+  const d=(DB.diet||[]).find(x=>x.date===date);
+  if(!d){ showToast('该日期无饮食记录'); return; }
+  let html=`<h3>🍽️ ${date} 周${getWeekday(date)} 饮食详情</h3>`;
+  if(d.water){
+    html+=`<div style="text-align:center;background:var(--light-blue);border-radius:12px;padding:10px;margin-bottom:14px;">
+      <span style="font-size:13px;color:var(--blue);font-weight:700;">💧 饮水 ${d.water}ml</span>
+    </div>`;
+  }
+  const mealTypes=['早餐','午餐','晚餐','加餐'];
+  let totalCal=0;
+  mealTypes.forEach(mt=>{
+    const items=(d.meals||[]).filter(m=>m.type===mt);
+    if(items.length===0) return;
+    const mealCal=items.reduce((s,m)=>s+(m.calories||0),0);
+    totalCal+=mealCal;
+    html+=`<div style="background:var(--bg-deep);border-radius:12px;padding:12px;margin-bottom:10px;">
+      <div style="display:flex;justify-content:space-between;font-size:13px;font-weight:700;margin-bottom:6px;">
+        <span>${mt}</span><span style="color:var(--red);">${mealCal} kcal</span>
+      </div>`;
+    items.forEach(m=>{
+      html+=`<div style="display:flex;justify-content:space-between;font-size:12px;padding:3px 0;">
+        <span>${m.name}</span><span style="color:var(--red);font-weight:700;">${m.calories||0} kcal</span>
+      </div>`;
+    });
+    html+=`</div>`;
+  });
+  html+=`<div style="text-align:center;font-size:16px;font-weight:900;color:var(--red);margin:10px 0;">总摄入 ${totalCal} kcal</div>`;
+  html+=`<button class="save-btn" onclick="closeBottomSheet()">关闭</button>`;
+  openBottomSheet(html);
 }
 
 // ============================================================
