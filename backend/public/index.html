@@ -1970,6 +1970,23 @@ function progressRecordHTML(key,m,record){
           <label>📝 错题速记</label>
           <textarea id="rec-note-${key}" rows="2" placeholder="记录错题要点...">${record.note||''}</textarea>
         </div>`;
+      // 按题型分类录入（图形推理/定义判断/类比推理/逻辑判断）
+      const subs = m.weakTags||[];
+      const recSubs = record.subBreakdown||{};
+      html+=`
+        <div class="input-group">
+          <label>📊 按题型分类录入（选填，填写后可查看各题型正确率）</label>
+        </div>`;
+      subs.forEach(s=>{
+        const sd = recSubs[s]||{};
+        html+=`
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+            <span style="width:70px;font-size:12px;font-weight:700;color:var(--text-sec);">${s}</span>
+            <input type="number" id="rec-sub-total-${key}-${s}" value="${sd.total||''}" placeholder="总题数" style="width:80px;" oninput="calcSubAccuracy('${key}','${s}')">
+            <input type="number" id="rec-sub-correct-${key}-${s}" value="${sd.correct||''}" placeholder="正确" style="width:80px;" oninput="calcSubAccuracy('${key}','${s}')">
+            <span style="font-size:11px;color:var(--blue);font-weight:700;" id="rec-sub-acc-${key}-${s}">${sd.accuracy!=null?sd.accuracy+'%':''}</span>
+          </div>`;
+      });
     }
     if(isZL){
       html+=`
@@ -2058,6 +2075,15 @@ function calcAccuracy(key){
   const acc=total>0?Math.round(correct/total*100):0;
   document.getElementById(`acc-${key}`).textContent=`→ 正确率：${acc}%`;
 }
+function calcSubAccuracy(key,subType){
+  const tEl=document.getElementById(`rec-sub-total-${key}-${subType}`);
+  const cEl=document.getElementById(`rec-sub-correct-${key}-${subType}`);
+  const accEl=document.getElementById(`rec-sub-acc-${key}-${subType}`);
+  if(!tEl||!cEl||!accEl) return;
+  const t=parseInt(tEl.value)||0;
+  const c=parseInt(cEl.value)||0;
+  accEl.textContent=t>0?Math.round(c/t*100)+'%':'';
+}
 function toggleChip(el,key,field,tag){
   el.classList.toggle('checked');
 }
@@ -2114,6 +2140,24 @@ function saveProgressRecord(key){
   const activeStars=document.querySelectorAll(`#diff-stars-${key} .star.active`);
   if(activeStars.length>0) rec.difficulty=activeStars.length;
 
+  // 判断推理：按题型分类保存
+  const m=MODULES.find(x=>x.key===key);
+  if(key==='panduan' && m.weakTags){
+    const subBd={};
+    m.weakTags.forEach(s=>{
+      const tEl=document.getElementById(`rec-sub-total-${key}-${s}`);
+      const cEl=document.getElementById(`rec-sub-correct-${key}-${s}`);
+      if(tEl&&cEl){
+        const t=parseInt(tEl.value)||0;
+        const c=parseInt(cEl.value)||0;
+        if(t>0||c>0){
+          subBd[s]={total:t,correct:c,accuracy:t>0?Math.round(c/t*100):0};
+        }
+      }
+    });
+    if(Object.keys(subBd).length>0) rec.subBreakdown=subBd;
+  }
+
   DB.records[key].push(rec);
   saveDB();
   showToast('🎀 已保存~');
@@ -2136,7 +2180,7 @@ function accuracyTrendHTML(key){
     return {label, value:r.accuracy, valLabel:r.accuracy+'%'};
   });
   const avg = Math.round(list.reduce((s,r)=>s+(r.accuracy||0),0)/list.length);
-  return `
+  let html = `
     <div class="chart-container">
       <div style="display:flex;justify-content:space-between;align-items:center;">
         <div style="font-size:13px;color:var(--red);font-weight:700;">📈 正确率趋势（每次录入）</div>
@@ -2145,6 +2189,101 @@ function accuracyTrendHTML(key){
       ${renderLineChart(data,'#E52211')}
     </div>
   `;
+
+  // 判断推理：各题型正确率分析
+  const m=MODULES.find(x=>x.key===key);
+  if(key==='panduan' && m.weakTags){
+    // 汇总各题型的总题数和总正确数
+    const subStats={};
+    m.weakTags.forEach(s=>{ subStats[s]={total:0,correct:0,records:0}; });
+    list.forEach(r=>{
+      if(r.subBreakdown){
+        Object.keys(r.subBreakdown).forEach(s=>{
+          if(subStats[s]){
+            subStats[s].total += r.subBreakdown[s].total||0;
+            subStats[s].correct += r.subBreakdown[s].correct||0;
+            subStats[s].records++;
+          }
+        });
+      }
+    });
+    const subList=Object.entries(subStats).filter(([k,v])=>v.total>0);
+    if(subList.length>0){
+      // 按正确率排序（从低到高，薄弱在前）
+      subList.sort((a,b)=>{
+        const accA=a[1].total>0?a[1].correct/a[1].total:0;
+        const accB=b[1].total>0?b[1].correct/b[1].total:0;
+        return accA-accB;
+      });
+      const maxAcc=Math.max(...subList.map(([k,v])=>v.total>0?Math.round(v.correct/v.total*100):0),1);
+      html+=`
+        <div class="chart-container">
+          <div style="font-size:13px;color:var(--red);font-weight:700;margin-bottom:10px;">📊 各题型正确率汇总（从低到高）</div>`;
+      subList.forEach(([s,v])=>{
+        const acc=v.total>0?Math.round(v.correct/v.total*100):0;
+        const isWeak=acc<70;
+        const barColor=isWeak?'var(--red)':'var(--blue)';
+        const w=(acc/maxAcc)*100;
+        html+=`
+          <div class="hbar-row">
+            <div class="hbar-label" style="${isWeak?'color:var(--red);font-weight:700;':''}">${isWeak?'⚠️ ':''}${s}</div>
+            <div class="hbar-track"><div class="hbar-fill" style="width:${w}%;background:${barColor};"></div></div>
+            <div class="hbar-val" style="${isWeak?'color:var(--red);font-weight:800;':''}">${v.correct}/${v.total} · ${acc}%</div>
+          </div>`;
+      });
+      html+=`</div>`;
+
+      // 薄弱模块提示
+      const weakest=subList[0];
+      const weakAcc=weakest[1].total>0?Math.round(weakest[1].correct/weakest[1].total*100):0;
+      if(weakAcc<70){
+        html+=`
+          <div class="card" style="background:var(--light-red);border:1px solid var(--red);">
+            <div style="font-size:13px;color:var(--red);font-weight:700;margin-bottom:4px;">⚠️ 薄弱题型提醒</div>
+            <div style="font-size:12px;color:var(--text);line-height:1.6;">
+              <strong>${weakest[0]}</strong> 正确率仅 <strong style="color:var(--red);">${weakAcc}%</strong>（${weakest[1].correct}/${weakest[1].total}题），建议针对性加强练习。
+              ${weakest[1].records>1?`共 ${weakest[1].records} 次记录。`:''}
+            </div>
+          </div>`;
+      }
+
+      // 各题型正确率趋势（多条折线对比）
+      // 为每个题型生成一条折线数据
+      const subColors=['#E52211','#0085D0','#FEE202','#FF6B9D','#4DB8E6','#FF9999'];
+      const subTrendData=subList.map(([s,v],idx)=>{
+        const color=subColors[idx%subColors.length];
+        // 收集该题型每次录入的正确率
+        const points=list.filter(r=>r.subBreakdown&&r.subBreakdown[s]&&r.subBreakdown[s].total>0)
+          .map(r=>{
+            const time=r.timestamp?new Date(r.timestamp):new Date(r.date+'T12:00:00');
+            const label=r.timestamp?`${r.date.slice(5)} ${String(time.getHours()).padStart(2,'0')}:${String(time.getMinutes()).padStart(2,'0')}`:r.date.slice(5);
+            return {label,value:r.subBreakdown[s].accuracy,valLabel:s+':'+r.subBreakdown[s].accuracy+'%'};
+          });
+        return {name:s,color,points};
+      });
+      const hasTrend=subTrendData.some(d=>d.points.length>=2);
+      if(hasTrend){
+        html+=`
+          <div class="chart-container">
+            <div style="font-size:13px;color:var(--red);font-weight:700;margin-bottom:8px;">📈 各题型正确率趋势对比</div>
+            <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:8px;">`;
+        subTrendData.forEach(d=>{
+          html+=`<span style="font-size:11px;color:${d.color};font-weight:700;">● ${d.name}</span>`;
+        });
+        html+=`</div>`;
+        // 找到所有记录的并集标签
+        const allLabels=[...new Set(subTrendData.flatMap(d=>d.points.map(p=>p.label)))].sort();
+        // 为每条线渲染折线
+        subTrendData.forEach((d,idx)=>{
+          if(d.points.length<1) return;
+          html+=`<div style="margin-bottom:6px;"><div style="font-size:11px;color:${d.color};font-weight:700;margin-bottom:2px;">${d.name}</div>${renderLineChart(d.points,d.color)}</div>`;
+        });
+        html+=`</div>`;
+      }
+    }
+  }
+
+  return html;
 }
 
 // ============================================================
