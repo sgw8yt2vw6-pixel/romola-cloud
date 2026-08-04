@@ -1287,6 +1287,14 @@ function renderHome(){
       if(t.date===today) todayTasks.push({...t, moduleKey:m.key, moduleIcon:m.icon, moduleName:m.name});
     });
   });
+  // 按模块+标题去重，避免模板+实例重复计数
+  const seenHome = new Map();
+  todayTasks = todayTasks.filter(t=>{
+    const key = t.moduleKey + '|' + (t.title || '');
+    if(seenHome.has(key)) return false;
+    seenHome.set(key, true);
+    return true;
+  });
   const undoneTasks = todayTasks.filter(t=>!t.isDone).slice(0,3);
   let taskOverviewHtml='';
   if(undoneTasks.length>0){
@@ -1599,8 +1607,11 @@ function renderModulePage(key){
   const weekDur=getWeekModuleDuration(key);
   const totalDur=getTotalModuleDuration(key);
   const tasks=DB.tasks[key]||[];
-  const todayTasks=tasks.filter(t=>t.date===today&&!t.isDone);
-  const doneTasks=tasks.filter(t=>t.date===today&&t.isDone);
+  let todayTasks=tasks.filter(t=>t.date===today&&!t.isDone);
+  let doneTasks=tasks.filter(t=>t.date===today&&t.isDone);
+  // 同标题任务在今日列表中只显示一条（避免模板+实例重复显示）
+  todayTasks = dedupTasksByTitle(todayTasks);
+  doneTasks = dedupTasksByTitle(doneTasks);
   const records=DB.records[key]||[];
   // 按 timestamp 取"今日最后一次记录"作为表单预填
   const todayRecords = records.filter(r=>r.date===today).sort((a,b)=>(b.timestamp||0)-(a.timestamp||0));
@@ -1660,6 +1671,27 @@ function bigTaskProgressHTML(key){
   `;
 }
 
+// 按 title 对任务去重（今日任务列表显示用）：保留优先级最高的一条
+// 优先级：未完成的今日实例 > 已完成的今日实例 > 模板
+function dedupTasksByTitle(tasks){
+  const groups = new Map();
+  tasks.forEach(t=>{
+    const title = t.title || '';
+    if(!groups.has(title)) groups.set(title, []);
+    groups.get(title).push(t);
+  });
+  const result = [];
+  groups.forEach(list=>{
+    // 优先保留：未完成的 > 已完成的 > createdAt 最新的
+    list.sort((a,b)=>{
+      if(a.isDone !== b.isDone) return a.isDone ? 1 : -1;
+      return (b.createdAt||0) - (a.createdAt||0);
+    });
+    result.push(list[0]);
+  });
+  return result;
+}
+
 function editTodayDuration(key){
   const today=todayStr();
   const cur=(DB.manualDuration[today]&&DB.manualDuration[today][key])||0;
@@ -1702,6 +1734,9 @@ function deleteEditDuration(key){
 }
 
 function taskSectionHTML(key,m,todayTasks,doneTasks){
+  // 防御性去重（即使调用方未去重也保证不重复显示）
+  todayTasks = dedupTasksByTitle(todayTasks);
+  doneTasks = dedupTasksByTitle(doneTasks);
   let html=`<div class="section-title"><span class="st-icon">📋</span>今日任务</div>`;
   if(todayTasks.length===0 && doneTasks.length===0){
     html+=`
@@ -2697,8 +2732,10 @@ function renderShenlunPage(){
   const weekDur=getWeekModuleDuration('shenlun');
   const totalDur=getTotalModuleDuration('shenlun');
   const tasks=DB.tasks['shenlun']||[];
-  const todayTasks=tasks.filter(t=>t.date===today&&!t.isDone);
-  const doneTasks=tasks.filter(t=>t.date===today&&t.isDone);
+  let todayTasks=tasks.filter(t=>t.date===today&&!t.isDone);
+  let doneTasks=tasks.filter(t=>t.date===today&&t.isDone);
+  todayTasks = dedupTasksByTitle(todayTasks);
+  doneTasks = dedupTasksByTitle(doneTasks);
 
   let html=moduleHeaderHTML(m,todayDur);
   html+=statCardsHTML('shenlun',todayDur,weekDur,totalDur);
@@ -2919,8 +2956,10 @@ function renderMokaoPage(){
 
   // 任务
   const tasks=DB.tasks['mokao']||[];
-  const todayTasks=tasks.filter(t=>t.date===today&&!t.isDone);
-  const doneTasks=tasks.filter(t=>t.date===today&&t.isDone);
+  let todayTasks=tasks.filter(t=>t.date===today&&!t.isDone);
+  let doneTasks=tasks.filter(t=>t.date===today&&t.isDone);
+  todayTasks = dedupTasksByTitle(todayTasks);
+  doneTasks = dedupTasksByTitle(doneTasks);
   html+='<div class="section-title"><span class="st-icon">📋</span>今日模考任务</div>';
   if(todayTasks.length===0&&doneTasks.length===0){
     html+=`<div class="card"><div class="empty-state"><div class="es-icon">🏆</div><div class="es-text">还没有模考任务，添加一个吧~</div></div></div>`;
@@ -3248,8 +3287,10 @@ function renderYundongPage(){
   html+=bigTaskProgressHTML('yundong');
 
   const tasks=DB.tasks['yundong']||[];
-  const todayTasks=tasks.filter(t=>t.date===today&&!t.isDone);
-  const doneTasks=tasks.filter(t=>t.date===today&&t.isDone);
+  let todayTasks=tasks.filter(t=>t.date===today&&!t.isDone);
+  let doneTasks=tasks.filter(t=>t.date===today&&t.isDone);
+  todayTasks = dedupTasksByTitle(todayTasks);
+  doneTasks = dedupTasksByTitle(doneTasks);
   html+='<div class="section-title"><span class="st-icon">📋</span>今日运动任务</div>';
   if(todayTasks.length===0&&doneTasks.length===0){
     html+=`<div class="card"><div class="empty-state"><div class="es-icon">🎽</div><div class="es-text">还没有运动任务，添加一个吧~</div></div></div>`;
@@ -3403,8 +3444,10 @@ function renderShizhengPage(){
   html+=bigTaskProgressHTML('shizheng');
 
   const tasks=DB.tasks['shizheng']||[];
-  const todayTasks=tasks.filter(t=>t.date===today&&!t.isDone);
-  const doneTasks=tasks.filter(t=>t.date===today&&t.isDone);
+  let todayTasks=tasks.filter(t=>t.date===today&&!t.isDone);
+  let doneTasks=tasks.filter(t=>t.date===today&&t.isDone);
+  todayTasks = dedupTasksByTitle(todayTasks);
+  doneTasks = dedupTasksByTitle(doneTasks);
   html+='<div class="section-title"><span class="st-icon">📋</span>今日阅读任务</div>';
   if(todayTasks.length===0&&doneTasks.length===0){
     html+=`<div class="card"><div class="empty-state"><div class="es-icon">📰</div><div class="es-text">还没有任务哦，添加第一个吧~</div></div></div>`;
@@ -3488,8 +3531,10 @@ function renderQingxuPage(){
   html+=bigTaskProgressHTML('qingxu');
 
   const tasks=DB.tasks['qingxu']||[];
-  const todayTasks=tasks.filter(t=>t.date===today&&!t.isDone);
-  const doneTasks=tasks.filter(t=>t.date===today&&t.isDone);
+  let todayTasks=tasks.filter(t=>t.date===today&&!t.isDone);
+  let doneTasks=tasks.filter(t=>t.date===today&&t.isDone);
+  todayTasks = dedupTasksByTitle(todayTasks);
+  doneTasks = dedupTasksByTitle(doneTasks);
   html+='<div class="section-title"><span class="st-icon">📋</span>自我关怀任务</div>';
   if(todayTasks.length===0&&doneTasks.length===0){
     html+=`<div class="card"><div class="empty-state"><div class="es-icon">🌈</div><div class="es-text">今天也要好好照顾自己哦~</div></div></div>`;
@@ -3650,8 +3695,10 @@ function renderFupanPage(){
   html+=bigTaskProgressHTML('fupan');
 
   const tasks=DB.tasks['fupan']||[];
-  const todayTasks=tasks.filter(t=>t.date===today&&!t.isDone);
-  const doneTasks=tasks.filter(t=>t.date===today&&t.isDone);
+  let todayTasks=tasks.filter(t=>t.date===today&&!t.isDone);
+  let doneTasks=tasks.filter(t=>t.date===today&&t.isDone);
+  todayTasks = dedupTasksByTitle(todayTasks);
+  doneTasks = dedupTasksByTitle(doneTasks);
   html+='<div class="section-title"><span class="st-icon">📋</span>复盘任务</div>';
   if(todayTasks.length===0&&doneTasks.length===0){
     html+=`<div class="card"><div class="empty-state"><div class="es-icon">💌</div><div class="es-text">今天值得复盘一下~</div></div></div>`;
