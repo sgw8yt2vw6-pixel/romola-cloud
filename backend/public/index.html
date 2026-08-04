@@ -690,18 +690,34 @@ const SHENLUN_TYPES = [
 const MATERIAL_CATS = ['政治','经济','文化','社会','生态'];
 
 // ============================================================
-//  云端 API 配置（部署后自动获取）
+//  云端 API 配置（部署后自动获取，也可手动配置）
 // ============================================================
-// 本地开发时设为空字符串 ''，部署后由页面自动获取
+// 优先级：手动配置 > 自动检测 > 默认 Railway 地址
 let API_BASE = '';
 // 尝试自动检测 API 地址（从当前页面 URL 推导）
 (function detectApiBase(){
+  // 先检查是否手动配置过（存储在 localStorage 中）
+  const manual = localStorage.getItem(STORAGE_KEY + '_apiBase');
+  if(manual){
+    API_BASE = manual;
+    return;
+  }
+  // 已部署的 Railway 后端地址（自动连接）
+  const DEFAULT_API = 'https://romola-cloud-production.up.railway.app';
   const loc = window.location;
   // 如果是通过 Railway / 公网域名访问，用同域 API
-  if(loc.hostname !== 'localhost' && loc.hostname !== '127.0.0.1') {
+  if(loc.hostname !== 'localhost' && loc.hostname !== '127.0.0.1' && loc.protocol !== 'file:') {
     API_BASE = loc.origin;
+  } else {
+    // 本地打开：自动使用已部署的 Railway 地址
+    API_BASE = DEFAULT_API;
+    localStorage.setItem(STORAGE_KEY + '_lastApiBase', DEFAULT_API);
   }
-  // 如果是本地调试，保留空
+  // 兜底：尝试上次保存的地址
+  if(!API_BASE){
+    const last = localStorage.getItem(STORAGE_KEY + '_lastApiBase');
+    if(last) API_BASE = last;
+  }
 })();
 
 let DB = null;
@@ -993,26 +1009,58 @@ function renderPage(key){
 // 兼容两种模式：
 //   A. 任务有 "taskTotal"（总量，例如 1000 题）+ "taskDone"（已完成）
 //   B. 任务有 "targetMin"（时长目标）
+//
+// 【去重策略】同一标题的任务（模板 + 每日实例）只算一次总量和进度：
+//   1. 按 title 分组，每组只保留一条「代表任务」
+//   2. 优先取模板（无 originalId 或 originalId===自身 id）
+//   3. 没有模板则取最新的实例（originalId 指向已不存在的源）
+//   4. taskDone 取代表任务的值，但若该 title 下有更晚的实例，取最大值
+//      （因为实例的 taskDone 是从模板复制的，完成后会递增，最新值最准）
 function getModuleTotals(moduleKey){
   const list = DB.tasks[moduleKey]||[];
-  let total = 0, done = 0;
-  // 同标题任务去重后累加（避免同标题的多个副本把 taskDone 算多次）
-  const seenTmpl = new Map();
-  const sortedList = list.slice().sort((a,b)=>(b.createdAt||0)-(a.createdAt||0));
-  sortedList.forEach(t=>{
+  if(list.length === 0) return {total:0, done:0};
+
+  // 按 title 分组
+  const groups = new Map(); // title -> {tmpl, instances:[]}
+  list.forEach(t=>{
     if(!t.taskTotal) return;
+    const title = t.title || '';
+    if(!groups.has(title)) groups.set(title, {tmpl:null, instances:[]});
+    const g = groups.get(title);
     const isTmpl = !t.originalId || t.originalId === t.id;
-    const sig = isTmpl ? `tmpl|${t.title||''}` : `inst|${t.originalId}|${t.date||''}`;
-    // 仅模板按 title 去重（避免历史重复任务的 taskDone 重复计入）
-    // 实例按 originalId+date 去重
-    if(isTmpl && seenTmpl.has(sig)) return;
-    seenTmpl.set(sig, true);
-    total += parseInt(t.taskTotal)||0;
-    let d = parseInt(t.taskDone)||0;
-    // 防止异常数据：taskDone 不能超过 taskTotal
-    if(d > (parseInt(t.taskTotal)||0)) d = parseInt(t.taskTotal)||0;
-    done += d;
+    if(isTmpl){
+      // 模板：取最新的一条（createdAt 最大）
+      if(!g.tmpl || (t.createdAt||0) > (g.tmpl.createdAt||0)) g.tmpl = t;
+    } else {
+      g.instances.push(t);
+    }
   });
+
+  let total = 0, done = 0;
+  groups.forEach(g=>{
+    // 代表任务：优先模板，否则取最新实例
+    let rep = g.tmpl;
+    if(!rep && g.instances.length > 0){
+      rep = g.instances.slice().sort((a,b)=>(b.createdAt||0)-(a.createdAt||0))[0];
+    }
+    if(!rep) return;
+
+    const t = parseInt(rep.taskTotal)||0;
+    if(t <= 0) return;
+    total += t;
+
+    // taskDone：在所有同标题任务中取最大值（最新完成状态）
+    let maxDone = parseInt(rep.taskDone)||0;
+    const allSameTitle = [g.tmpl, ...g.instances].filter(Boolean);
+    allSameTitle.forEach(x=>{
+      const d = parseInt(x.taskDone)||0;
+      if(d > maxDone) maxDone = d;
+    });
+    // 防止异常数据：taskDone 不能超过 taskTotal
+    if(maxDone > t) maxDone = t;
+    done += maxDone;
+  });
+
   return {total, done};
 }
 function getGrandTaskTotals(){
@@ -1022,6 +1070,60 @@ function getGrandTaskTotals(){
     total+=r.total; done+=r.done;
   });
   return {total, done};
+}
+
+// 返回每个模块中各任务（按 title 去重后）的明细，供调试/图表复用
+function getModuleTaskDetails(moduleKey){
+  const list = DB.tasks[moduleKey]||[];
+  if(list.length === 0) return [];
+
+  const groups = new Map();
+  list.forEach(t=>{
+    if(!t.taskTotal) return;
+    const title = t.title || '';
+    if(!groups.has(title)) groups.set(title, {tmpl:null, instances:[]});
+    const g = groups.get(title);
+    const isTmpl = !t.originalId || t.originalId === t.id;
+    if(isTmpl){
+      if(!g.tmpl || (t.createdAt||0) > (g.tmpl.createdAt||0)) g.tmpl = t;
+    } else {
+      g.instances.push(t);
+    }
+  });
+
+  const details = [];
+  groups.forEach(g=>{
+    let rep = g.tmpl;
+    if(!rep && g.instances.length > 0){
+      rep = g.instances.slice().sort((a,b)=>(b.createdAt||0)-(a.createdAt||0))[0];
+    }
+    if(!rep) return;
+    const t = parseInt(rep.taskTotal)||0;
+    if(t <= 0) return;
+    let maxDone = parseInt(rep.taskDone)||0;
+    [g.tmpl, ...g.instances].filter(Boolean).forEach(x=>{
+      const d = parseInt(x.taskDone)||0;
+      if(d > maxDone) maxDone = d;
+    });
+    if(maxDone > t) maxDone = t;
+    const allCount = [g.tmpl, ...g.instances].filter(Boolean).length;
+    details.push({
+      title: rep.title,
+      total: t,
+      done: maxDone,
+      isTemplate: !rep.originalId || rep.originalId === rep.id,
+      duplicateCount: allCount, // 同标题共有几条记录
+      repId: rep.id,
+      repDate: rep.date
+    });
+  });
+  // 按 done/total 比例排序（完成度低的在前）
+  details.sort((a,b)=>{
+    const ra = a.total > 0 ? a.done / a.total : 0;
+    const rb = b.total > 0 ? b.done / b.total : 0;
+    return ra - rb;
+  });
+  return details;
 }
 
 // ============================================================
@@ -1060,49 +1162,31 @@ function renderBlockProgress(done, total, unit='', blockCount=12){
 }
 
 // 单模块任务总量进程可视化（方块进度 + 总数）
+// 复用 getModuleTotals / getModuleTaskDetails 确保数值与首页/统计页一致
 function renderModuleBlockChartHTML(moduleKey, m){
-  const tasks = DB.tasks[moduleKey]||[];
-  let total = 0, done = 0, hasSub = false;
-  const subtaskItems = [];
-  tasks.forEach(t=>{
-    if(t.taskTotal){
-      total += parseInt(t.taskTotal)||0;
-      done  += parseInt(t.taskDone)||0;
-      hasSub = true;
-      // 收集子任务进度
-      if(t.subtasks && t.subtasks.length>0){
-        const subDone = t.subtasks.filter(s=>s.done).length;
-        subtaskItems.push({
-          title: t.title,
-          total: t.taskTotal,
-          done: t.taskDone||0,
-          subtasks: t.subtasks,
-          subtaskDone: subDone,
-          subtaskTotal: t.subtasks.length
-        });
-      }
-    }
-  });
-  if(total === 0) return '';
-  const pct = Math.round(done/total*100);
+  const totals = getModuleTotals(moduleKey);
+  if(totals.total === 0) return '';
+  const pct = Math.round(totals.done/totals.total*100);
   let html = `
     <div class="grand-progress-card">
       <div class="gpc-title">
         <span>🎯 ${m.icon} ${m.name} - 任务总量进程</span>
-        <span class="gpc-val">${done} / ${total}（${pct}%）</span>
+        <span class="gpc-val">${totals.done} / ${totals.total}（${pct}%）</span>
       </div>
-      <div class="gpc-summary">每块 ≈ ${Math.ceil(total/12)} ${t.unit||'题'}，绿色为已完成</div>
-      ${renderBlockProgress(done, total, t.unit||'题')}
+      <div class="gpc-summary">每块 ≈ ${Math.ceil(totals.total/12)} 题，绿色为已完成</div>
+      ${renderBlockProgress(totals.done, totals.total, '题')}
   `;
-  // 子任务展开
-  if(subtaskItems.length > 0){
+  // 各任务明细展开（去重后）
+  const details = getModuleTaskDetails(moduleKey);
+  if(details.length > 0){
     html += '<div style="margin-top:10px;border-top:1px dashed #eee;padding-top:8px;">';
-    subtaskItems.forEach(item=>{
+    details.forEach(item=>{
+      const itemPct = item.total > 0 ? Math.round(item.done/item.total*100) : 0;
       html += `
         <div style="font-size:12px;margin-bottom:6px;color:var(--text-sec);">
           <div style="display:flex;justify-content:space-between;margin-bottom:4px;">
-            <span>📌 ${item.title}</span>
-            <span style="color:var(--blue);font-weight:700;">子任务 ${item.subtaskDone}/${item.subtaskTotal}</span>
+            <span>📌 ${item.title}${item.duplicateCount>1?` <span style="font-size:10px;color:var(--blue);">(${item.duplicateCount}条记录)</span>`:''}</span>
+            <span style="color:var(--blue);font-weight:700;">${item.done}/${item.total} · ${itemPct}%</span>
           </div>
           ${renderBlockProgress(item.done, item.total, '', 10)}
         </div>`;
@@ -1842,6 +1926,28 @@ function saveEditTask(key,taskId){
   task.dailyTarget = parseInt(document.getElementById('editTaskDaily').value)||0;
   task.repeat = document.getElementById('editTaskRepeat').value;
 
+  // 如果编辑的是实例，同步 taskDone/taskTotal 到模板（保持数据一致）
+  const isInst = task.originalId && task.originalId !== task.id;
+  if(isInst){
+    const tmpl = DB.tasks[key].find(t=>t.id===task.originalId);
+    if(tmpl){
+      tmpl.taskTotal = task.taskTotal;
+      // 模板 taskDone 取较大值（编辑实例时可能是在修正进度）
+      tmpl.taskDone = Math.max(parseInt(tmpl.taskDone)||0, task.taskDone);
+      if(tmpl.taskTotal && tmpl.taskDone > tmpl.taskTotal) tmpl.taskDone = tmpl.taskTotal;
+    }
+  } else {
+    // 编辑的是模板：同步 taskTotal 到所有同标题实例
+    DB.tasks[key].forEach(t=>{
+      if(t.originalId === task.id && t.id !== task.id){
+        t.taskTotal = task.taskTotal;
+        t.dailyTarget = task.dailyTarget;
+        // 实例的 taskDone 不超过新的 taskTotal
+        if(t.taskTotal && (parseInt(t.taskDone)||0) > t.taskTotal) t.taskDone = t.taskTotal;
+      }
+    });
+  }
+
   saveDB();
   closeBottomSheet();
   showToast('✏️ 已更新~');
@@ -1860,6 +1966,33 @@ function toggleTask(key,taskId,e){
     task.taskDone = (parseInt(task.taskDone)||0) + parseInt(task.dailyTarget);
     if(task.taskTotal && task.taskDone>=task.taskTotal){
       task.taskDone = task.taskTotal;
+    }
+    // 【关键】同步更新模板的 taskDone，确保进度不丢失
+    // 如果当前任务是实例（有 originalId 且不等于自身 id），则找到其模板并同步
+    const isInst = task.originalId && task.originalId !== task.id;
+    if(isInst){
+      const tmpl = DB.tasks[key].find(t=>t.id===task.originalId);
+      if(tmpl){
+        // 模板 taskDone 取「模板当前值」和「实例 taskDone」的较大值
+        const tmplDone = parseInt(tmpl.taskDone)||0;
+        const instDone = parseInt(task.taskDone)||0;
+        tmpl.taskDone = Math.max(tmplDone, instDone);
+        if(tmpl.taskTotal && tmpl.taskDone > tmpl.taskTotal) tmpl.taskDone = tmpl.taskTotal;
+      }
+    } else {
+      // 当前任务本身就是模板，确保同标题的所有实例 taskDone 不超过模板
+      // （防止历史数据中实例的 taskDone 比模板还大）
+    }
+  }
+  // 取消完成时，如果是实例，同步回退模板的 taskDone
+  if(!task.isDone && task.dailyTarget){
+    const isInst = task.originalId && task.originalId !== task.id;
+    if(isInst){
+      const tmpl = DB.tasks[key].find(t=>t.id===task.originalId);
+      if(tmpl){
+        // 回退：模板 taskDone -= dailyTarget（但不低于 0）
+        tmpl.taskDone = Math.max(0, (parseInt(tmpl.taskDone)||0) - parseInt(task.dailyTarget));
+      }
     }
   }
   saveDB();
@@ -4125,9 +4258,10 @@ function renderSettingsPage(){
       <div style="font-size:12px;color:var(--text-sec);line-height:1.8;margin-bottom:10px;">
         在每台设备上输入<strong style="color:var(--red);">相同的设备码</strong>，数据通过 <strong>Supabase</strong> 云数据库自动同步。
         <br>📌 每次保存 <strong>自动推送</strong>到云端，后台每 5 分钟 <strong>自动检查更新</strong>。
-        <br>${API_BASE ? '<span style="color:var(--blue);">🟢 后端服务已连接</span>' : '<span style="color:var(--red);">🔴 后端服务未连接（部署到 Railway 后自动生效）</span>'}
+        <br><span id="cloudStatusText">${API_BASE ? '<span style="color:var(--blue);">🟢 后端服务已连接（' + API_BASE.replace('https://','') + '）</span>' : '<span style="color:var(--red);">🔴 后端服务未连接</span>'}</span>
       </div>
       <button class="data-action-btn" style="background:var(--yellow);color:var(--dark);" onclick="openCloudSync()">☁️ 打开云端同步</button>
+      <button class="data-action-btn" style="background:var(--light-blue);color:var(--blue);margin-top:6px;" onclick="openCloudConfig()">⚙️ 配置云端地址</button>
     </div>
 
     <div class="card">
@@ -4189,37 +4323,102 @@ function renderSettingsPage(){
 //  真·多设备同步：数据存云端 PostgreSQL，多设备共享
 // ============================================================
 
-// 调试：显示每个任务对总进程的贡献
+// 调试：显示每个任务对总进程的贡献（与 getModuleTotals 去重逻辑一致）
 function showTaskProgressDebug(){
   let html = `<h3>🔍 任务进程明细</h3>`;
-  html += `<div style="font-size:11px;color:var(--text-sec);margin-bottom:10px;">查看每个任务对总计的贡献，删除异常条目。</div>`;
-  let grandTotal=0, grandDone=0;
+  html += `<div style="font-size:11px;color:var(--text-sec);margin-bottom:10px;">查看每个任务对总计的贡献（同标题已自动去重）。删除异常条目后数值会刷新。</div>`;
+  const grand = getGrandTaskTotals();
+  let grandTotal = grand.total, grandDone = grand.done;
   MODULES.forEach(m=>{
-    const list = DB.tasks[m.key]||[];
-    const withTotal = list.filter(t=>t.taskTotal);
-    if(withTotal.length === 0) return;
-    html += `<div style="margin-top:12px;font-weight:700;color:var(--red);">${m.icon} ${m.name}</div>`;
-    const seenT = new Set();
-    const sortedList = withTotal.slice().sort((a,b)=>(b.createdAt||0)-(a.createdAt||0));
-    sortedList.forEach((t,i)=>{
-      const isTmpl = !t.originalId || t.originalId === t.id;
-      const dup = isTmpl && seenT.has(t.title);
-      const isDup = isTmpl ? (seenT.has(t.title) ? ' ⚠️重复' : (seenT.add(t.title), '')) : ' 📅实例';
-      grandTotal += parseInt(t.taskTotal)||0;
-      grandDone += parseInt(t.taskDone)||0;
-      const done = parseInt(t.taskDone)||0;
-      const total = parseInt(t.taskTotal)||0;
+    const details = getModuleTaskDetails(m.key);
+    if(details.length === 0) return;
+    const modTotals = getModuleTotals(m.key);
+    html += `<div style="margin-top:12px;font-weight:700;color:var(--red);">${m.icon} ${m.name} <span style="color:var(--blue);font-size:11px;">（去重后 ${modTotals.done}/${modTotals.total}）</span></div>`;
+    details.forEach((item,i)=>{
+      const pct = item.total > 0 ? Math.round(item.done/item.total*100) : 0;
+      const dupTag = item.duplicateCount > 1 ? ` <span style="font-size:10px;color:var(--blue);">(${item.duplicateCount}条)</span>` : '';
+      const typeTag = item.isTemplate ? ' 📋模板' : ' 📅实例';
       html += `<div style="display:flex;justify-content:space-between;align-items:center;font-size:11px;padding:5px 8px;background:${i%2?'#fafafa':'#fff'};border-radius:4px;margin-top:2px;">
-        <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${t.title}${isDup}</span>
-        <span style="color:var(--blue);font-weight:700;margin-left:8px;">${done}/${total}</span>
-        <button class="task-btn task-btn-del" style="font-size:10px;padding:2px 6px;margin-left:6px;" onclick="deleteTask('${m.key}','${t.id}');showTaskProgressDebug();">🗑️</button>
+        <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${item.title}${dupTag}${typeTag}</span>
+        <span style="color:var(--blue);font-weight:700;margin-left:8px;">${item.done}/${item.total} · ${pct}%</span>
+        <button class="task-btn task-btn-del" style="font-size:10px;padding:2px 6px;margin-left:6px;" onclick="deleteTask('${m.key}','${item.repId}');showTaskProgressDebug();">🗑️</button>
       </div>`;
     });
   });
-  html += `<div style="margin-top:14px;padding:10px;background:var(--light-yellow);border-radius:6px;font-weight:700;text-align:center;">总计：${grandDone}/${grandTotal}</div>`;
+  html += `<div style="margin-top:14px;padding:10px;background:var(--light-yellow);border-radius:6px;font-weight:700;text-align:center;">总计（去重后）：${grandDone}/${grandTotal}</div>`;
   html += `<div class="bs-close" onclick="closeBottomSheet()">关闭</div>`;
   openBottomSheet(html);
 }
+function openCloudConfig(){
+  const curUrl = API_BASE || localStorage.getItem(STORAGE_KEY + '_lastApiBase') || '';
+  const html = `
+    <h3>⚙️ 配置云端地址</h3>
+    <div style="font-size:12px;color:var(--text-sec);line-height:1.8;margin-bottom:14px;">
+      输入你的 <strong>Railway 部署地址</strong>（格式：<code>https://xxx.railway.app</code>）<br>
+      💡 设置后本地文件也能连接云端同步，所有设备共用此地址。
+    </div>
+    <div class="input-group">
+      <label>Railway 后端地址</label>
+      <input type="text" id="cloudApiInput" value="${curUrl}" placeholder="https://your-app.railway.app">
+    </div>
+    <div style="display:flex;gap:8px;">
+      <button class="save-btn" style="flex:1;" onclick="saveCloudConfig()">💾 保存并连接</button>
+      ${curUrl ? '<button class="save-btn ghost" style="flex:1;" onclick="clearCloudConfig()">🗑️ 清除配置</button>' : ''}
+    </div>
+    <div id="cloudConfigTest" style="margin-top:12px;font-size:12px;text-align:center;"></div>
+    <div class="bs-close" onclick="closeBottomSheet()">取消</div>
+  `;
+  openBottomSheet(html);
+}
+
+async function saveCloudConfig(){
+  const url = document.getElementById('cloudApiInput').value.trim();
+  const testEl = document.getElementById('cloudConfigTest');
+  if(!url){
+    showToast('请输入 Railway 地址');
+    return;
+  }
+  // 去掉末尾斜杠
+  const baseUrl = url.replace(/\/+$/, '');
+  if(!baseUrl.startsWith('http')){
+    showToast('地址需以 http:// 或 https:// 开头');
+    return;
+  }
+
+  testEl.innerHTML = '⏳ 正在测试连接...';
+
+  try{
+    const resp = await fetch(baseUrl + '/api/sync/pull?deviceId=test');
+    if(resp.status === 200 || resp.status === 404){
+      API_BASE = baseUrl;
+      localStorage.setItem(STORAGE_KEY + '_apiBase', baseUrl);
+      localStorage.setItem(STORAGE_KEY + '_lastApiBase', baseUrl);
+      testEl.innerHTML = '<span style="color:var(--blue);">✅ 连接成功！云端同步已激活</span>';
+      showToast('✅ 云端已连接~');
+      // 刷新设置页
+      setTimeout(()=>{
+        closeBottomSheet();
+        renderSettingsPage();
+      }, 800);
+    } else {
+      testEl.innerHTML = '<span style="color:var(--red);">⚠️ 服务器响应异常（状态码：' + resp.status + '）</span>';
+    }
+  }catch(e){
+    testEl.innerHTML = '<span style="color:var(--red);">❌ 无法连接：' + e.message + '</span>';
+    showToast('连接失败，请检查地址');
+  }
+}
+
+function clearCloudConfig(){
+  if(!confirm('确定清除云端地址配置吗？\n（不影响已推送的数据，只是断开本地连接）')) return;
+  API_BASE = '';
+  localStorage.removeItem(STORAGE_KEY + '_apiBase');
+  localStorage.removeItem(STORAGE_KEY + '_lastApiBase');
+  closeBottomSheet();
+  showToast('🗑️ 已清除云端配置');
+  renderSettingsPage();
+}
+
 function openCloudSync(){
   const curId = localStorage.getItem(SYNC_KEY) || '';
   const statusEl = `
@@ -4680,10 +4879,26 @@ function generateRecurringTasks(){
       else if(t.repeat==='weekly') shouldCreate=(dayOfWeek===1);
       else if(t.repeat==='monthly') shouldCreate=(new Date().getDate()===1);
       if(shouldCreate){
+        // 新实例的 taskDone 应从模板获取最新累计值（代表截至昨天的完成量）
+        // 这样今天完成后 taskDone += dailyTarget 才是正确的累计值
+        let initialDone = 0;
+        const tmpl = isTmpl ? t : list.find(x=>x.id===effectiveOriginalId);
+        if(tmpl){
+          // 取模板和所有同标题实例中的最大 taskDone
+          initialDone = parseInt(tmpl.taskDone)||0;
+          list.forEach(x=>{
+            if(x.title === t.title){
+              const d = parseInt(x.taskDone)||0;
+              if(d > initialDone) initialDone = d;
+            }
+          });
+          // 不能超过 taskTotal
+          if(t.taskTotal && initialDone > t.taskTotal) initialDone = t.taskTotal;
+        }
         list.push({
           id:uid(),title:t.title,targetMin:t.targetMin,actualMin:0,isDone:false,
           date:today,createdAt:Date.now(),repeat:t.repeat,originalId:effectiveOriginalId,
-          taskTotal:t.taskTotal||0, taskDone:t.taskDone||0, dailyTarget:t.dailyTarget||0,
+          taskTotal:t.taskTotal||0, taskDone:initialDone, dailyTarget:t.dailyTarget||0,
           subtasks: t.subtasks? t.subtasks.map(s=>({title:s.title,done:false})) : []
         });
         generatedTitles.add(t.title);
