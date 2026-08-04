@@ -4318,6 +4318,7 @@ function renderSettingsPage(){
       <input type="file" id="import-file" accept=".json" style="display:none;" onchange="importData(this)">
       <button class="data-action-btn" style="background:var(--light-red);color:var(--red);" onclick="clearAllData()">🗑️ 清空所有数据</button>
       <button class="data-action-btn" style="background:var(--light-yellow);color:var(--dark);" onclick="dedupAllData()">🔍 一键去重（清理重复记录）</button>
+      <button class="data-action-btn" style="background:var(--light-red);color:var(--red);margin-top:8px;" onclick="compactTasks()">🧹 合并同标题任务（清理历史实例）</button>
     </div>
 
     <div class="card">
@@ -4868,6 +4869,82 @@ function dedupAllData(){
   } else {
     showToast('✅ 没有发现重复数据');
   }
+  const active=document.querySelector('.nav-item.active');
+  if(active) renderPage(active.dataset.page);
+}
+
+// ============================================================
+//  合并同标题任务（把历史实例合并到模板，只保留今天实例）
+// ============================================================
+function compactTasks(){
+  if(!confirm('确定合并同标题任务吗？\n\n会把每个任务的历史实例合并到模板里，只保留「模板 + 今天实例（如果有）」。\n\n⚠️ 建议先导出数据备份。')) return;
+
+  let mergedCount = 0;
+  let deletedCount = 0;
+
+  Object.keys(DB.tasks||{}).forEach(modKey=>{
+    const arr = DB.tasks[modKey]||[];
+    if(arr.length < 2) return;
+
+    const groups = new Map(); // title -> {tmpl, instances:[]}
+    arr.forEach(t=>{
+      const title = t.title || '';
+      if(!groups.has(title)) groups.set(title, {tmpl:null, instances:[]});
+      const g = groups.get(title);
+      const isTmpl = !t.originalId || t.originalId === t.id;
+      if(isTmpl){
+        if(!g.tmpl || (t.createdAt||0) > (g.tmpl.createdAt||0)) g.tmpl = t;
+      } else {
+        g.instances.push(t);
+      }
+    });
+
+    const newArr = [];
+    groups.forEach((g, title)=>{
+      // 确定模板
+      let tmpl = g.tmpl;
+      if(!tmpl && g.instances.length > 0){
+        // 没有模板：把最新的实例升级为模板
+        const sortedInst = g.instances.slice().sort((a,b)=>(b.createdAt||0)-(a.createdAt||0));
+        tmpl = sortedInst.shift();
+        tmpl.originalId = tmpl.id; // 标记为自身源
+        mergedCount++;
+      }
+      if(!tmpl) return;
+
+      const total = parseInt(tmpl.taskTotal)||0;
+
+      // 计算该标题下所有记录的最大 taskDone
+      let maxDone = parseInt(tmpl.taskDone)||0;
+      g.instances.forEach(inst=>{
+        const d = parseInt(inst.taskDone)||0;
+        if(d > maxDone) maxDone = d;
+      });
+      if(total > 0 && maxDone > total) maxDone = total;
+      tmpl.taskDone = maxDone;
+
+      // 只保留今天实例（用于今日打卡），其他历史实例删除
+      const today = todayStr();
+      const todayInst = g.instances.find(inst=>inst.date === today && inst.id !== tmpl.id);
+
+      newArr.push(tmpl);
+      if(todayInst){
+        // 同步今天实例的进度
+        todayInst.taskDone = maxDone;
+        todayInst.taskTotal = total;
+        todayInst.dailyTarget = tmpl.dailyTarget;
+        todayInst.originalId = tmpl.id;
+        newArr.push(todayInst);
+      }
+
+      deletedCount += g.instances.filter(inst=>inst !== todayInst).length;
+    });
+
+    DB.tasks[modKey] = newArr;
+  });
+
+  saveDB();
+  showToast(`✅ 合并完成：清理 ${deletedCount} 条历史实例`);
   const active=document.querySelector('.nav-item.active');
   if(active) renderPage(active.dataset.page);
 }
